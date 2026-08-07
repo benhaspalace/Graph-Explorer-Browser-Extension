@@ -1,0 +1,460 @@
+/* Graph Explorer JSON Query — panel styles (injected into a ShadowRoot). */
+
+:host {
+  all: initial;
+}
+
+* {
+  box-sizing: border-box;
+  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", sans-serif;
+}
+
+:host {
+  --gejq-accent: #0f6cbd;
+  --gejq-accent-hover: #115ea3;
+  --gejq-bg: #ffffff;
+  --gejq-bg-subtle: #f5f5f5;
+  --gejq-border: #d1d1d1;
+  --gejq-text: #242424;
+  --gejq-text-subtle: #616161;
+  --gejq-error: #b10e1c;
+  --gejq-json-key: #a31515;
+  --gejq-json-string: #0451a5;
+  --gejq-json-number: #098658;
+  --gejq-json-literal: #0000ff;
+  --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+}
+
+@media (prefers-color-scheme: dark) {
+  :host {
+    --gejq-accent: #479ef5;
+    --gejq-accent-hover: #62abf5;
+    --gejq-bg: #292929;
+    --gejq-bg-subtle: #1f1f1f;
+    --gejq-border: #4d4d4d;
+    --gejq-text: #ffffff;
+    --gejq-text-subtle: #adadad;
+    --gejq-error: #f97b8b;
+    --gejq-json-key: #9cdcfe;
+    --gejq-json-string: #ce9178;
+    --gejq-json-number: #b5cea8;
+    --gejq-json-literal: #569cd6;
+    --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* ------------------------------------------------ floating action button */
+
+.gejq-fab {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 24px;
+  background: var(--gejq-accent);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--gejq-shadow);
+}
+
+.gejq-fab:hover {
+  background: var(--gejq-accent-hover);
+}
+
+.gejq-fab.gejq-hidden {
+  display: none;
+}
+
+.gejq-fab-icon,
+.gejq-title-icon {
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-weight: 700;
+}
+
+.gejq-fab-badge {
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #ffffff;
+  color: var(--gejq-accent);
+  font-size: 12px;
+  text-align: center;
+}
+
+@keyframes gejq-pulse-anim {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+
+.gejq-fab.gejq-pulse {
+  animation: gejq-pulse-anim 0.4s ease;
+}
+
+/* ------------------------------------------------------------------ panel */
+
+.gejq-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2147483001;
+  display: flex;
+  flex-direction: column;
+  width: min(440px, 92vw);
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  border-left: 1px solid var(--gejq-border);
+  box-shadow: var(--gejq-shadow);
+  transform: translateX(105%);
+  transition: transform 0.2s ease;
+  font-size: 13px;
+}
+
+.gejq-panel.gejq-open {
+  transform: translateX(0);
+}
+
+/* Embedded mode: the panel is the right half of Graph Explorer's results
+   area — a normal-flow block instead of a fixed drawer. Query input sits
+   on top, results underneath. */
+.gejq-panel.gejq-embedded {
+  position: static;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  transform: none;
+  transition: none;
+  border: 1px solid var(--gejq-border);
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.gejq-embedded .gejq-header {
+  border-radius: 6px 6px 0 0;
+}
+
+.gejq-embedded .gejq-result {
+  min-height: 60px;
+}
+
+.gejq-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--gejq-border);
+  background: var(--gejq-bg-subtle);
+}
+
+.gejq-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.gejq-title-icon {
+  color: var(--gejq-accent);
+}
+
+.gejq-header-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.gejq-icon-button {
+  padding: 4px 10px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.gejq-icon-button:hover {
+  border-color: var(--gejq-accent);
+  color: var(--gejq-accent);
+}
+
+.gejq-close {
+  font-weight: 700;
+}
+
+/* ---------------------------------------------------------------- history */
+
+.gejq-history-row {
+  padding: 8px 12px 0;
+}
+
+.gejq-history-select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ query */
+
+.gejq-query-row {
+  padding: 8px 12px 0;
+}
+
+.gejq-query-input {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 13px;
+  resize: vertical;
+  min-height: 40px;
+}
+
+.gejq-query-input:focus {
+  outline: 2px solid var(--gejq-accent);
+  outline-offset: -1px;
+}
+
+.gejq-error {
+  min-height: 16px;
+  padding: 2px 12px;
+  color: var(--gejq-error);
+  font-size: 12px;
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.gejq-meta {
+  padding: 0 12px 4px;
+  color: var(--gejq-text-subtle);
+  font-size: 12px;
+}
+
+/* ----------------------------------------------------------------- result */
+
+.gejq-result {
+  flex: 1;
+  overflow: auto;
+  margin: 0 12px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg-subtle);
+}
+
+.gejq-json {
+  margin: 0;
+  padding: 10px;
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.gejq-tok-key { color: var(--gejq-json-key); }
+.gejq-tok-string { color: var(--gejq-json-string); }
+.gejq-tok-number { color: var(--gejq-json-number); }
+.gejq-tok-literal { color: var(--gejq-json-literal); }
+
+.gejq-empty,
+.gejq-notice {
+  padding: 16px 12px;
+  color: var(--gejq-text-subtle);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ------------------------------------------------------------ suggestions */
+
+.gejq-suggestions {
+  padding: 8px 12px 0;
+}
+
+.gejq-help-heading {
+  margin-bottom: 6px;
+  color: var(--gejq-text-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gejq-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.gejq-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 10px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 12px;
+  background: var(--gejq-bg);
+  color: var(--gejq-accent);
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.gejq-chip:hover {
+  border-color: var(--gejq-accent);
+  background: var(--gejq-bg-subtle);
+}
+
+/* ------------------------------------------------------------------- help */
+
+.gejq-help {
+  margin: 8px 12px 0;
+  border-top: 1px solid var(--gejq-border);
+  padding-top: 6px;
+}
+
+.gejq-help summary {
+  color: var(--gejq-text-subtle);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.gejq-help-body {
+  padding: 8px 0 2px;
+}
+
+.gejq-help-text {
+  margin: 0 0 8px;
+  color: var(--gejq-text-subtle);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.gejq-help-text a {
+  color: var(--gejq-accent);
+}
+
+.gejq-example {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.gejq-example-label {
+  color: var(--gejq-text-subtle);
+  font-size: 11px;
+}
+
+/* ----------------------------------------------------------------- footer */
+
+.gejq-footer {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.gejq-action {
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.gejq-action:hover:not(:disabled) {
+  border-color: var(--gejq-accent);
+  color: var(--gejq-accent);
+}
+
+.gejq-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.gejq-primary {
+  background: var(--gejq-accent);
+  border-color: var(--gejq-accent);
+  color: #ffffff;
+}
+
+.gejq-primary:hover:not(:disabled) {
+  background: var(--gejq-accent-hover);
+  color: #ffffff;
+}
+
+/* ----------------------------------------------------------- paste dialog */
+
+.gejq-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483002;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.gejq-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(560px, 92vw);
+  max-height: 80vh;
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  box-shadow: var(--gejq-shadow);
+}
+
+.gejq-dialog-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.gejq-paste-input {
+  flex: 1;
+  min-height: 220px;
+  padding: 8px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg-subtle);
+  color: var(--gejq-text);
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.gejq-dialog-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.gejq-dialog-buttons .gejq-action {
+  flex: 0 0 auto;
+  min-width: 90px;
+}

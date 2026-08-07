@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Graph Explorer JSON Query</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <span class="icon">{;}</span>
+    <h1>Graph Explorer JSON Query</h1>
+  </header>
+
+  <ol>
+    <li>Open <strong>Graph Explorer</strong> and run any query.</li>
+    <li>The results area splits in half — the <strong>JSON Query</strong> panel appears on the right (use the button in the bottom-right corner to show it again if hidden).</li>
+    <li>Type a <strong>JMESPath</strong> expression (like Azure CLI <code>--query</code>) in the top box; the filtered result appears below it.</li>
+    <li>Copy or download the result as JSON or CSV.</li>
+  </ol>
+
+  <p class="example">Example: <code>value[].{name: displayName, email: mail}</code></p>
+
+  <a id="open-explorer" class="button" href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="_blank" rel="noreferrer noopener">Open Graph Explorer</a>
+
+  <footer>
+    <a href="https://jmespath.org/tutorial.html" target="_blank" rel="noreferrer noopener">JMESPath tutorial</a>
+    <span id="version"></span>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>
