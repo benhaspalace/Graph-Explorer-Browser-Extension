@@ -210,7 +210,26 @@
 /* ------------------------------------------------------------------ query */
 
 .gejq-query-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
   padding: 8px 12px 0;
+}
+
+.gejq-lang-select {
+  flex: 0 0 auto;
+  padding: 6px 4px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  font-size: 12px;
+}
+
+.gejq-query-history {
+  max-height: 180px;
+  overflow: auto;
+  margin-bottom: 6px;
 }
 
 .gejq-query-input {
@@ -370,6 +389,38 @@
   display: flex;
   gap: 8px;
   padding: 10px 12px;
+}
+
+.gejq-seg {
+  display: flex;
+  flex: 0 0 auto;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.gejq-seg-btn {
+  padding: 7px 12px;
+  border: none;
+  background: var(--gejq-bg);
+  color: var(--gejq-text-subtle);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.gejq-seg-btn + .gejq-seg-btn {
+  border-left: 1px solid var(--gejq-border);
+}
+
+.gejq-seg-btn.gejq-seg-active {
+  background: var(--gejq-accent);
+  color: #ffffff;
+}
+
+.gejq-seg-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .gejq-action {

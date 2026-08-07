@@ -6,6 +6,12 @@
  * Every JSON response coming back from a Microsoft Graph endpoint is
  * forwarded to the extension's content script via window.postMessage.
  *
+ * When the "advanced queries" setting is on (the default), outgoing GET
+ * requests that use $filter/$search/$orderby/$count are upgraded with
+ * the `ConsistencyLevel: eventual` header and `$count=true`, as
+ * required by Microsoft Graph advanced queries. The content script
+ * pushes setting changes in via window.postMessage.
+ *
  * Nothing here leaves the browser: messages stay within the page.
  */
 (function () {
@@ -17,6 +23,7 @@
   window.__gejqInterceptorInstalled = true;
 
   var MESSAGE_SOURCE = 'gejq-interceptor';
+  var SETTINGS_SOURCE = 'gejq-settings';
   var MAX_BODY_CHARS = 10 * 1024 * 1024; // 10 MB of JSON text is plenty
   var GRAPH_HOSTS = [
     'graph.microsoft.com',
@@ -27,6 +34,21 @@
   ];
 
   var idCounter = 0;
+
+  // Defaults match the extension's stored defaults; the content script
+  // pushes the user's actual settings in shortly after page load.
+  var settings = { advancedQuery: true, autoFetchNextLink: false };
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== window || event.origin !== window.location.origin) {
+      return;
+    }
+    var data = event.data;
+    if (data && data.source === SETTINGS_SOURCE && data.settings && typeof data.settings === 'object') {
+      settings.advancedQuery = data.settings.advancedQuery !== false;
+      settings.autoFetchNextLink = data.settings.autoFetchNextLink === true;
+    }
+  });
 
   function isGraphHost(hostname) {
     var h = String(hostname || '').toLowerCase();
@@ -39,21 +61,23 @@
   }
 
   /**
-   * Returns the Graph API URL a request targets, or null if it is not a
-   * Graph request. Handles both direct calls and Graph Explorer's
-   * anonymous-mode proxy (…/proxy?url=<encoded graph url>).
+   * Returns { url, direct } for the Graph API URL a request targets, or
+   * null if it is not a Graph request. `direct` is true when the request
+   * itself goes to a Graph host; false when it goes through Graph
+   * Explorer's anonymous-mode proxy (…/proxy?url=<encoded graph url>),
+   * whose URL we must not rewrite.
    */
   function resolveGraphUrl(rawUrl) {
     try {
       var u = new URL(rawUrl, window.location.href);
       if (isGraphHost(u.hostname)) {
-        return u.href;
+        return { url: u.href, direct: true };
       }
       var inner = u.searchParams.get('url');
       if (inner) {
         var innerUrl = new URL(inner);
         if (isGraphHost(innerUrl.hostname)) {
-          return innerUrl.href;
+          return { url: innerUrl.href, direct: false };
         }
       }
     } catch (e) {
@@ -83,35 +107,206 @@
 
   function handleBodyText(text, method, url, status) {
     if (typeof text !== 'string' || text.length === 0) {
-      return;
+      return null;
     }
     var entry = makeEntry(method, url, status);
     if (text.length > MAX_BODY_CHARS) {
       entry.tooLarge = true;
       entry.size = text.length;
       post(entry);
-      return;
+      return null;
     }
     var trimmed = text.replace(/^\uFEFF/, '').trim();
     if (trimmed[0] !== '{' && trimmed[0] !== '[') {
-      return; // not JSON (binary, HTML error page, …)
+      return null; // not JSON (binary, HTML error page, …)
     }
     var json;
     try {
       json = JSON.parse(trimmed);
     } catch (e) {
-      return;
+      return null;
     }
     entry.json = json;
     entry.size = text.length;
     post(entry);
+    return entry;
+  }
+
+  // -------------------------------------------------- @odata.nextLink pages
+
+  var MAX_PAGES = 50;
+
+  /**
+   * When the auto-fetch setting is on and a captured GET response is
+   * paged, follow the @odata.nextLink chain (replaying the original
+   * request's own headers, so authentication keeps working), merge all
+   * `value` arrays, and post the combined dataset as an extra entry
+   * marked with the number of pages fetched. Fetching stops at MAX_PAGES
+   * pages or MAX_BODY_CHARS of accumulated JSON, whichever comes first.
+   */
+  function maybeAutoFetchAllPages(firstEntry, headers, method) {
+    if (!settings.autoFetchNextLink || String(method || 'GET').toUpperCase() !== 'GET') {
+      return;
+    }
+    var firstJson = firstEntry.json;
+    if (!firstJson || typeof firstJson !== 'object' || Array.isArray(firstJson) || !Array.isArray(firstJson.value)) {
+      return;
+    }
+    if (typeof firstJson['@odata.nextLink'] !== 'string') {
+      return;
+    }
+    var combinedValue = firstJson.value.slice();
+    var pages = 1;
+    var totalSize = firstEntry.size || 0;
+
+    function finish() {
+      if (pages < 2) {
+        return; // nothing was fetched — the original entry already posted
+      }
+      var combined = {};
+      for (var key in firstJson) {
+        if (Object.prototype.hasOwnProperty.call(firstJson, key) && key !== '@odata.nextLink') {
+          combined[key] = firstJson[key];
+        }
+      }
+      combined.value = combinedValue;
+      var entry = makeEntry(method, firstEntry.url, firstEntry.status);
+      entry.json = combined;
+      entry.size = totalSize;
+      entry.pages = pages;
+      post(entry);
+    }
+
+    function step(nextUrl) {
+      var parsed;
+      try {
+        parsed = new URL(nextUrl);
+      } catch (e) {
+        finish();
+        return;
+      }
+      if (!isGraphHost(parsed.hostname) || pages >= MAX_PAGES || totalSize > MAX_BODY_CHARS) {
+        finish();
+        return;
+      }
+      originalFetch(nextUrl, { headers: headers })
+        .then(function (response) {
+          if (!response.ok) {
+            finish();
+            return;
+          }
+          response
+            .text()
+            .then(function (text) {
+              var pageJson;
+              try {
+                pageJson = JSON.parse(text);
+              } catch (e) {
+                finish();
+                return;
+              }
+              if (!pageJson || !Array.isArray(pageJson.value)) {
+                finish();
+                return;
+              }
+              totalSize += text.length;
+              combinedValue = combinedValue.concat(pageJson.value);
+              pages += 1;
+              if (typeof pageJson['@odata.nextLink'] === 'string') {
+                step(pageJson['@odata.nextLink']);
+              } else {
+                finish();
+              }
+            })
+            .catch(finish);
+        })
+        .catch(finish);
+    }
+
+    step(firstJson['@odata.nextLink']);
+  }
+
+  /** Best-effort view of the headers a fetch call is about to send. */
+  function requestHeaders(input, init) {
+    if (init && init.headers) {
+      return init.headers;
+    }
+    if (input instanceof Request) {
+      return input.headers;
+    }
+    return undefined;
+  }
+
+  /**
+   * Upgrade an outgoing fetch to a Graph advanced query when the setting
+   * is on: append $count=true and add `ConsistencyLevel: eventual` for
+   * GET requests using $filter/$search/$orderby/$count. Only rewrites
+   * direct Graph calls — the anonymous-mode proxy wraps the target URL
+   * and is left untouched. Returns [input, init].
+   */
+  function upgradeRequest(input, init, graphInfo, method) {
+    if (!settings.advancedQuery || typeof GEJQ === 'undefined' || !graphInfo.direct) {
+      return [input, init];
+    }
+    var advanced = GEJQ.applyAdvancedQuery(graphInfo.url, method);
+    if (!advanced.addHeader) {
+      return [input, init];
+    }
+    if (typeof input === 'string' || (input instanceof URL && !(input instanceof Request))) {
+      var headers = new Headers((init && init.headers) || undefined);
+      if (!headers.has('ConsistencyLevel')) {
+        headers.set('ConsistencyLevel', 'eventual');
+      }
+      var newInit = {};
+      for (var key in init) {
+        newInit[key] = init[key];
+      }
+      newInit.headers = headers;
+      return [advanced.url, newInit];
+    }
+    if (input instanceof Request) {
+      var requestHeaders = new Headers(input.headers);
+      if (init && init.headers) {
+        new Headers(init.headers).forEach(function (headerValue, headerName) {
+          requestHeaders.set(headerName, headerValue);
+        });
+      }
+      if (!requestHeaders.has('ConsistencyLevel')) {
+        requestHeaders.set('ConsistencyLevel', 'eventual');
+      }
+      // GET/HEAD requests carry no body, so all other fields can be
+      // copied from the original Request while swapping the URL.
+      var rebuilt = new Request(advanced.url, {
+        method: input.method,
+        headers: requestHeaders,
+        mode: input.mode,
+        credentials: input.credentials,
+        cache: input.cache,
+        redirect: input.redirect,
+        referrer: input.referrer,
+        referrerPolicy: input.referrerPolicy,
+        integrity: input.integrity,
+        signal: input.signal
+      });
+      var restInit = {};
+      var changed = false;
+      for (var initKey in init) {
+        if (initKey !== 'headers') {
+          restInit[initKey] = init[initKey];
+          changed = true;
+        }
+      }
+      return [rebuilt, changed ? restInit : undefined];
+    }
+    return [input, init];
   }
 
   // ---- fetch ----
   var originalFetch = window.fetch;
   if (typeof originalFetch === 'function') {
     window.fetch = function (input, init) {
-      var result = originalFetch.apply(this, arguments);
+      var graphUrl = null;
+      var method = 'GET';
       try {
         var rawUrl =
           typeof input === 'string'
@@ -119,12 +314,29 @@
             : input && typeof input.url === 'string'
               ? input.url
               : String(input);
-        var graphUrl = resolveGraphUrl(rawUrl);
-        if (graphUrl) {
-          var method =
+        var graphInfo = resolveGraphUrl(rawUrl);
+        if (graphInfo) {
+          graphUrl = graphInfo.url;
+          method =
             (init && init.method) ||
             (input && typeof input === 'object' && input.method) ||
             'GET';
+          var upgraded = upgradeRequest(input, init, graphInfo, method);
+          input = upgraded[0];
+          init = upgraded[1];
+          graphUrl =
+            typeof input === 'string'
+              ? input
+              : input && typeof input.url === 'string'
+                ? input.url
+                : graphUrl;
+        }
+      } catch (e) {
+        /* never break the page's fetch */
+      }
+      var result = init === undefined ? originalFetch.call(this, input) : originalFetch.call(this, input, init);
+      try {
+        if (graphUrl) {
           result
             .then(function (response) {
               try {
@@ -136,7 +348,10 @@
                   .clone()
                   .text()
                   .then(function (text) {
-                    handleBodyText(text, method, graphUrl, response.status);
+                    var entry = handleBodyText(text, method, graphUrl, response.status);
+                    if (entry && entry.json && graphInfo && graphInfo.direct) {
+                      maybeAutoFetchAllPages(entry, requestHeaders(input, init), method);
+                    }
                   })
                   .catch(function () {});
               } catch (e) {
@@ -168,8 +383,9 @@
     XhrProto.send = function () {
       var info = this.__gejqRequest;
       if (info) {
-        var graphUrl = resolveGraphUrl(info.url);
-        if (graphUrl) {
+        var graphInfo = resolveGraphUrl(info.url);
+        if (graphInfo) {
+          var graphUrl = graphInfo.url;
           var xhr = this;
           xhr.addEventListener('load', function () {
             try {

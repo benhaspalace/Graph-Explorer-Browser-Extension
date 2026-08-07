@@ -67,6 +67,70 @@ code {
   font-size: 12px;
 }
 
+.settings {
+  margin: 0 0 12px;
+  padding-top: 8px;
+  border-top: 1px solid #e0e0e0;
+}
+
+.settings h2 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #616161;
+}
+
+.settings label {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.settings input {
+  margin: 2px 0 0;
+  flex: 0 0 auto;
+}
+
+.settings select,
+.settings input[type="number"] {
+  padding: 3px 6px;
+  border: 1px solid #d1d1d1;
+  border-radius: 4px;
+  background: inherit;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+
+.settings input[type="number"] {
+  width: 70px;
+}
+
+.field-label {
+  font-weight: 600;
+}
+
+.settings label.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .settings {
+    border-top-color: #4d4d4d;
+  }
+  .settings h2 {
+    color: #adadad;
+  }
+}
+
 .button {
   display: block;
   padding: 8px;

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 
 const GEJQ = require('../src/query-utils.js');
 const jmespath = require('../vendor/jmespath.js');
+const { JSONPath } = require('../vendor/jsonpath-plus.js');
 
 const SAMPLE_USERS_RESPONSE = {
   '@odata.context': 'https://graph.microsoft.com/v1.0/$metadata#users',
@@ -91,6 +92,125 @@ test('every suggested query is valid JMESPath against the source data', () => {
       assert.doesNotThrow(() => jmespath.search(shape, query), `query ${query} should compile`);
     }
   }
+});
+
+test('applyAdvancedQuery upgrades GET requests using advanced query options', () => {
+  for (const trigger of ['$filter=startswith(displayName,%27a%27)', '$search="displayName:room"', '$orderby=displayName']) {
+    const result = GEJQ.applyAdvancedQuery('https://graph.microsoft.com/v1.0/users?' + trigger, 'GET');
+    assert.equal(result.addHeader, true, trigger);
+    assert.ok(result.url.includes('%24count=true') || result.url.includes('$count=true'), result.url);
+  }
+});
+
+test('applyAdvancedQuery keeps an existing $count and still asks for the header', () => {
+  const url = 'https://graph.microsoft.com/v1.0/users?$count=true&$filter=x';
+  const result = GEJQ.applyAdvancedQuery(url, 'GET');
+  assert.equal(result.addHeader, true);
+  assert.equal((result.url.match(/%24count|\$count/g) || []).length, 1);
+});
+
+test('applyAdvancedQuery handles /$count path segments', () => {
+  const result = GEJQ.applyAdvancedQuery('https://graph.microsoft.com/v1.0/users/$count', 'GET');
+  assert.equal(result.addHeader, true);
+  assert.equal(result.url, 'https://graph.microsoft.com/v1.0/users/$count');
+});
+
+test('applyAdvancedQuery leaves plain and non-GET requests untouched', () => {
+  const plain = GEJQ.applyAdvancedQuery('https://graph.microsoft.com/v1.0/me', 'GET');
+  assert.deepEqual(plain, { url: 'https://graph.microsoft.com/v1.0/me', addHeader: false });
+
+  const select = GEJQ.applyAdvancedQuery('https://graph.microsoft.com/v1.0/users?$select=id', 'GET');
+  assert.equal(select.addHeader, false);
+  assert.ok(!select.url.includes('$count'));
+
+  const post = GEJQ.applyAdvancedQuery('https://graph.microsoft.com/v1.0/users?$filter=x', 'POST');
+  assert.equal(post.addHeader, false);
+  assert.ok(!post.url.includes('$count'));
+
+  const invalid = GEJQ.applyAdvancedQuery('not a url', 'GET');
+  assert.deepEqual(invalid, { url: 'not a url', addHeader: false });
+});
+
+test('applyAdvancedQuery preserves existing query parameters', () => {
+  const result = GEJQ.applyAdvancedQuery(
+    'https://graph.microsoft.com/v1.0/users?$select=displayName&$filter=startswith(displayName,%27a%27)&$top=5',
+    'get'
+  );
+  assert.equal(result.addHeader, true);
+  const parsed = new URL(result.url);
+  assert.equal(parsed.searchParams.get('$select'), 'displayName');
+  assert.equal(parsed.searchParams.get('$top'), '5');
+  assert.equal(parsed.searchParams.get('$count'), 'true');
+  assert.equal(parsed.searchParams.get('$filter'), "startswith(displayName,'a')");
+});
+
+test('suggestQueries also proposes JSONPath queries', () => {
+  const suggestions = GEJQ.suggestQueries(SAMPLE_USERS_RESPONSE, 'jsonpath');
+  assert.ok(suggestions.includes('$.value[*].displayName'));
+  assert.ok(suggestions.includes('$.value.length'));
+});
+
+test('every suggested JSONPath query is valid against the source data', () => {
+  const shapes = [
+    SAMPLE_USERS_RESPONSE,
+    { id: '1', displayName: 'Adele Vance', '@odata.context': 'ctx' },
+    [1, 2, 3],
+    { value: [] },
+    { value: [{ '@odata.type': '#microsoft.graph.user', 'odd key': 1 }] },
+    'scalar',
+    null
+  ];
+  for (const shape of shapes) {
+    for (const query of GEJQ.suggestQueries(shape, 'jsonpath')) {
+      assert.doesNotThrow(
+        () => JSONPath({ path: query, json: shape, wrap: true }),
+        `query ${query} should evaluate`
+      );
+    }
+  }
+});
+
+test('upsertQueryHistory keeps distinct queries newest-first with timestamps', () => {
+  let history = [];
+  history = GEJQ.upsertQueryHistory(history, { query: 'a', language: 'jmespath', lastUsed: 1000, context: { method: 'GET', url: '/v1.0/users' } }, 50);
+  history = GEJQ.upsertQueryHistory(history, { query: 'b', language: 'jmespath', lastUsed: 2000, context: null }, 50);
+  assert.deepEqual(history.map((h) => h.query), ['b', 'a']);
+  assert.equal(history[1].lastUsed, 1000);
+  assert.equal(history[1].context.url, '/v1.0/users');
+
+  // Re-running "a" moves it up, bumps uses, refreshes lastUsed, keeps context.
+  history = GEJQ.upsertQueryHistory(history, { query: 'a', language: 'jmespath', lastUsed: 3000, context: null }, 50);
+  assert.deepEqual(history.map((h) => h.query), ['a', 'b']);
+  assert.equal(history[0].uses, 2);
+  assert.equal(history[0].lastUsed, 3000);
+  assert.equal(history[0].context.url, '/v1.0/users');
+
+  // Same text in a different language is a distinct entry.
+  history = GEJQ.upsertQueryHistory(history, { query: 'a', language: 'jsonpath', lastUsed: 4000, context: null }, 50);
+  assert.equal(history.length, 3);
+});
+
+test('upsertQueryHistory honors the limit; 0 means unlimited', () => {
+  let history = [];
+  for (let i = 0; i < 10; i++) {
+    history = GEJQ.upsertQueryHistory(history, { query: 'q' + i, language: 'jmespath', lastUsed: i, context: null }, 3);
+  }
+  assert.equal(history.length, 3);
+  assert.deepEqual(history.map((h) => h.query), ['q9', 'q8', 'q7']);
+
+  let unlimited = [];
+  for (let i = 0; i < 10; i++) {
+    unlimited = GEJQ.upsertQueryHistory(unlimited, { query: 'q' + i, language: 'jmespath', lastUsed: i, context: null }, 0);
+  }
+  assert.equal(unlimited.length, 10);
+});
+
+test('formatTimestamp shows clock time today and full date otherwise', () => {
+  const noon = new Date(2026, 7, 7, 12, 0, 0).getTime();
+  const morning = new Date(2026, 7, 7, 9, 5, 7).getTime();
+  const lastWeek = new Date(2026, 6, 30, 9, 5, 0).getTime();
+  assert.equal(GEJQ.formatTimestamp(morning, noon), '09:05:07');
+  assert.equal(GEJQ.formatTimestamp(lastWeek, noon), '2026-07-30 09:05');
 });
 
 test('toCsv converts arrays of objects with union of columns', () => {

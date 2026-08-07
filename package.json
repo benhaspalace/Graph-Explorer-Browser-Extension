@@ -1,6 +1,6 @@
 {
   "name": "graph-explorer-json-query",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Browser extension (Chrome/Edge) adding JMESPath JSON query capabilities to Microsoft Graph Explorer results.",
   "license": "MIT",
