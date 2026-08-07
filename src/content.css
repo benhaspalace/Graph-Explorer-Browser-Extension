@@ -266,6 +266,28 @@
   font-size: 12px;
 }
 
+.gejq-warning {
+  padding: 0 12px;
+  color: #8a5a00;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.gejq-warning:not(:empty) {
+  padding-bottom: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .gejq-warning {
+    color: #f2c661;
+  }
+}
+
+.gejq-load {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
 /* ----------------------------------------------------------------- result */
 
 .gejq-result {

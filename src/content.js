@@ -36,6 +36,8 @@
     advancedQuery: true,
     autoSignIn: true,
     autoFetchNextLink: false,
+    autoFetchMaxPages: 50,
+    autoFetchMaxMb: 10,
     queryLanguage: 'jmespath',
     historyLimit: 50 // 0 = unlimited
   };
@@ -258,6 +260,7 @@
 
     if (!response) {
       ui.error.textContent = '';
+      ui.warning.textContent = '';
       ui.meta.textContent = '';
       clearChildren(ui.resultOutput);
       ui.resultOutput.appendChild(
@@ -273,6 +276,7 @@
 
     if (response.tooLarge) {
       ui.error.textContent = '';
+      ui.warning.textContent = '';
       ui.meta.textContent = '';
       clearChildren(ui.resultOutput);
       ui.resultOutput.appendChild(
@@ -285,6 +289,10 @@
       updateExportButtons();
       return;
     }
+
+    ui.warning.textContent = response.truncated
+      ? '⚠ Auto-fetch stopped early: only ' + response.pages + ' pages (' + GEJQ.formatBytes(response.size) + ') were fetched before hitting the configured limit — this dataset is incomplete. Raise the auto-fetch limits in the extension settings to fetch more.'
+      : '';
 
     var outcome = currentResult();
     if (outcome.error) {
@@ -354,6 +362,13 @@
 
   // -------------------------------------------------------------- settings
 
+  function clampInt(value, min, max, fallback) {
+    if (typeof value === 'number' && isFinite(value) && value >= min) {
+      return Math.min(Math.floor(value), max);
+    }
+    return fallback;
+  }
+
   function normalizeSettings(raw) {
     var historyLimit = raw && typeof raw.historyLimit === 'number' && raw.historyLimit >= 0
       ? Math.floor(raw.historyLimit)
@@ -362,6 +377,8 @@
       advancedQuery: !raw || raw.advancedQuery !== false,
       autoSignIn: !raw || raw.autoSignIn !== false,
       autoFetchNextLink: !!raw && raw.autoFetchNextLink === true,
+      autoFetchMaxPages: clampInt(raw && raw.autoFetchMaxPages, 1, 1000, DEFAULT_SETTINGS.autoFetchMaxPages),
+      autoFetchMaxMb: clampInt(raw && raw.autoFetchMaxMb, 1, 50, DEFAULT_SETTINGS.autoFetchMaxMb),
       queryLanguage: raw && LANGUAGES[raw.queryLanguage] ? raw.queryLanguage : DEFAULT_SETTINGS.queryLanguage,
       historyLimit: historyLimit
     };
@@ -379,7 +396,9 @@
           source: SETTINGS_SOURCE,
           settings: {
             advancedQuery: state.settings.advancedQuery,
-            autoFetchNextLink: state.settings.autoFetchNextLink
+            autoFetchNextLink: state.settings.autoFetchNextLink,
+            autoFetchMaxPages: state.settings.autoFetchMaxPages,
+            autoFetchMaxChars: state.settings.autoFetchMaxMb * 1024 * 1024
           }
         },
         window.location.origin
@@ -479,7 +498,7 @@
     var clock = pad(time.getHours()) + ':' + pad(time.getMinutes()) + ':' + pad(time.getSeconds());
     var status = entry.manual ? 'pasted' : entry.status;
     if (entry.pages) {
-      status += ' · ' + entry.pages + ' pages';
+      status += ' · ' + entry.pages + ' pages' + (entry.truncated ? ', incomplete' : '');
     }
     return clock + ' · ' + entry.method + ' ' + GEJQ.summarizeUrl(entry.url, 60) + ' (' + status + ')';
   }
@@ -563,6 +582,47 @@
     ui.queryInput.focus();
   }
 
+  // ------------------------------------------------ populate Graph Explorer
+
+  /** Set a React-controlled input's value so the app sees the change. */
+  function setNativeInputValue(input, value) {
+    var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(input, value);
+    } else {
+      input.value = value;
+    }
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  /**
+   * Re-populate Graph Explorer's request editor with a saved method +
+   * URL. When the editor's current method already matches, the URL is
+   * written straight into the request input (no reload). Otherwise it
+   * falls back to Graph Explorer's own deep-link format — the same
+   * mechanism its "Share query" and history links use — which reloads
+   * the page with method, version, and resource pre-filled.
+   */
+  function populateGraphExplorer(method, url) {
+    method = String(method || 'GET').toUpperCase();
+    var input = document.querySelector('input[aria-label="Query sample input" i]');
+    var methodControl = document.querySelector('[aria-label="HTTP request method option" i]');
+    var currentMethod = methodControl && methodControl.textContent
+      ? methodControl.textContent.trim().toUpperCase()
+      : null;
+    if (input && currentMethod === method) {
+      setNativeInputValue(input, url);
+      input.focus();
+      return true;
+    }
+    var link = GEJQ.buildDeepLink(window.location.origin + window.location.pathname, method, url);
+    if (link) {
+      window.location.assign(link);
+      return true;
+    }
+    return false;
+  }
+
   // ---------------------------------------------------------- query history
 
   /**
@@ -632,6 +692,13 @@
         metaText += ' · ' + item.context.method + ' ' + GEJQ.summarizeUrl(item.context.url, 32);
       }
       row.appendChild(el('span', 'gejq-example-label', metaText));
+      if (item.context && item.context.url && GEJQ.parseGraphRequest(item.context.url)) {
+        row.appendChild(
+          button('gejq-chip gejq-load', 'Load ↗', 'Re-populate Graph Explorer with this request (method + URL)', function () {
+            populateGraphExplorer(item.context.method, item.context.url);
+          })
+        );
+      }
       container.appendChild(row);
     });
   }
@@ -954,6 +1021,9 @@
     var error = el('div', 'gejq-error');
     panel.appendChild(error);
 
+    var warning = el('div', 'gejq-warning');
+    panel.appendChild(warning);
+
     var meta = el('div', 'gejq-meta');
     panel.appendChild(meta);
 
@@ -1063,6 +1133,7 @@
       historySelect: historySelect,
       queryInput: queryInput,
       error: error,
+      warning: warning,
       meta: meta,
       resultOutput: resultOutput,
       suggestions: suggestions,
@@ -1125,6 +1196,7 @@
       json: payload.json,
       size: typeof payload.size === 'number' ? payload.size : 0,
       pages: typeof payload.pages === 'number' ? payload.pages : 0,
+      truncated: payload.truncated === true,
       tooLarge: payload.tooLarge === true
     });
   });

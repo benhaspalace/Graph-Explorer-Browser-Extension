@@ -236,6 +236,56 @@
   }
 
   /**
+   * Split a Graph API URL into the parts Graph Explorer's deep-link
+   * format uses: { graphUrl, version, request }. Returns null when the
+   * URL does not look like <cloud host>/<v1.0|beta>/<resource…>.
+   */
+  function parseGraphRequest(url) {
+    var parsed;
+    try {
+      parsed = new URL(url);
+    } catch (e) {
+      return null;
+    }
+    var segments = parsed.pathname.split('/').filter(function (segment) {
+      return segment !== '';
+    });
+    if (segments.length === 0 || !/^(v1\.0|beta)$/i.test(segments[0])) {
+      return null;
+    }
+    var request = segments.slice(1).join('/') + parsed.search;
+    if (request === '') {
+      return null;
+    }
+    return {
+      graphUrl: parsed.origin,
+      version: segments[0],
+      request: request
+    };
+  }
+
+  /**
+   * Build a Graph Explorer deep link (the same format its own
+   * "Share query" feature produces) that pre-fills method, version and
+   * resource URL on load. `pageBase` is the Graph Explorer page URL
+   * without query string. Returns null for URLs parseGraphRequest
+   * cannot handle.
+   */
+  function buildDeepLink(pageBase, method, url) {
+    var parts = parseGraphRequest(url);
+    if (!parts) {
+      return null;
+    }
+    return (
+      pageBase +
+      '?request=' + encodeURIComponent(parts.request) +
+      '&method=' + encodeURIComponent(String(method || 'GET').toUpperCase()) +
+      '&version=' + encodeURIComponent(parts.version) +
+      '&GraphUrl=' + encodeURIComponent(parts.graphUrl)
+    );
+  }
+
+  /**
    * Insert an executed query into the query history (newest first).
    * Entries are unique per (language, query): re-running a query moves it
    * to the top, bumps `uses`, and refreshes `lastUsed`/`context`.
@@ -402,6 +452,8 @@
     jmesKey: jmesKey,
     jsonPathKey: jsonPathKey,
     applyAdvancedQuery: applyAdvancedQuery,
+    parseGraphRequest: parseGraphRequest,
+    buildDeepLink: buildDeepLink,
     upsertQueryHistory: upsertQueryHistory,
     formatTimestamp: formatTimestamp,
     safeJsonParse: safeJsonParse,

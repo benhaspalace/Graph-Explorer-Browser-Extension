@@ -39,7 +39,12 @@
     </label>
     <label>
       <input type="checkbox" id="setting-auto-fetch" />
-      <span>Auto-fetch all pages: follow <code>@odata.nextLink</code> and add the combined dataset to the response list (up to 50 pages)</span>
+      <span>Auto-fetch all pages: follow <code>@odata.nextLink</code> and add the combined dataset to the response list</span>
+    </label>
+    <label class="sub">
+      <span class="field-label">Auto-fetch limits</span>
+      <input type="number" id="setting-auto-fetch-pages" min="1" max="1000" step="1" title="Maximum pages to fetch" /> <span>pages,</span>
+      <input type="number" id="setting-auto-fetch-mb" min="1" max="50" step="1" title="Maximum total size in MB" /> <span>MB</span>
     </label>
     <label>
       <span class="field-label">Query history limit</span>

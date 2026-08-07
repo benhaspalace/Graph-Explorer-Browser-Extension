@@ -122,6 +122,11 @@ code {
   margin: 0;
 }
 
+.settings label.sub {
+  margin-left: 22px;
+  align-items: center;
+}
+
 @media (prefers-color-scheme: dark) {
   .settings {
     border-top-color: #4d4d4d;

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Graph Explorer JSON Query",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Adds JMESPath JSON query capabilities to Microsoft Graph Explorer results: filter, reshape, and export the JSON returned by your Graph queries.",
   "homepage_url": "https://github.com/benhaspalace/Graph-Explorer-Browser-Extension",
   "minimum_chrome_version": "111",

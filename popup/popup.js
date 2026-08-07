@@ -8,6 +8,8 @@ var languageSelect = document.getElementById('setting-language');
 var advancedQueryBox = document.getElementById('setting-advanced-query');
 var autoSignInBox = document.getElementById('setting-auto-sign-in');
 var autoFetchBox = document.getElementById('setting-auto-fetch');
+var autoFetchPagesInput = document.getElementById('setting-auto-fetch-pages');
+var autoFetchMbInput = document.getElementById('setting-auto-fetch-mb');
 var historyLimitInput = document.getElementById('setting-history-limit');
 var historyUnlimitedBox = document.getElementById('setting-history-unlimited');
 var openExplorerLink = document.getElementById('open-explorer');
@@ -36,6 +38,14 @@ openExplorerLink.focus();
 
 var settings = {};
 
+function clampInt(value, min, max, fallback) {
+  var parsed = typeof value === 'string' ? parseInt(value, 10) : value;
+  if (typeof parsed === 'number' && isFinite(parsed) && parsed >= min) {
+    return Math.min(Math.floor(parsed), max);
+  }
+  return fallback;
+}
+
 chrome.storage.local.get([STORAGE_KEY_SETTINGS], function (items) {
   settings = items[STORAGE_KEY_SETTINGS] || {};
   languageSelect.value = settings.queryLanguage === 'jsonpath' ? 'jsonpath' : 'jmespath';
@@ -43,6 +53,8 @@ chrome.storage.local.get([STORAGE_KEY_SETTINGS], function (items) {
   advancedQueryBox.checked = settings.advancedQuery !== false;
   autoSignInBox.checked = settings.autoSignIn !== false;
   autoFetchBox.checked = settings.autoFetchNextLink === true;
+  autoFetchPagesInput.value = String(clampInt(settings.autoFetchMaxPages, 1, 1000, 50));
+  autoFetchMbInput.value = String(clampInt(settings.autoFetchMaxMb, 1, 50, 10));
   var limit = typeof settings.historyLimit === 'number' && settings.historyLimit >= 0 ? settings.historyLimit : 50;
   historyUnlimitedBox.checked = limit === 0;
   historyLimitInput.disabled = limit === 0;
@@ -64,6 +76,8 @@ function save() {
   settings.advancedQuery = advancedQueryBox.checked;
   settings.autoSignIn = autoSignInBox.checked;
   settings.autoFetchNextLink = autoFetchBox.checked;
+  settings.autoFetchMaxPages = clampInt(autoFetchPagesInput.value, 1, 1000, 50);
+  settings.autoFetchMaxMb = clampInt(autoFetchMbInput.value, 1, 50, 10);
   settings.historyLimit = limit;
   var items = {};
   items[STORAGE_KEY_SETTINGS] = settings;
@@ -74,5 +88,7 @@ languageSelect.addEventListener('change', save);
 advancedQueryBox.addEventListener('change', save);
 autoSignInBox.addEventListener('change', save);
 autoFetchBox.addEventListener('change', save);
+autoFetchPagesInput.addEventListener('change', save);
+autoFetchMbInput.addEventListener('change', save);
 historyLimitInput.addEventListener('change', save);
 historyUnlimitedBox.addEventListener('change', save);

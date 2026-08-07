@@ -37,7 +37,19 @@
 
   // Defaults match the extension's stored defaults; the content script
   // pushes the user's actual settings in shortly after page load.
-  var settings = { advancedQuery: true, autoFetchNextLink: false };
+  var settings = {
+    advancedQuery: true,
+    autoFetchNextLink: false,
+    autoFetchMaxPages: 50,
+    autoFetchMaxChars: 10 * 1024 * 1024
+  };
+
+  function positiveInt(value, fallback, max) {
+    if (typeof value === 'number' && isFinite(value) && value >= 1) {
+      return Math.min(Math.floor(value), max);
+    }
+    return fallback;
+  }
 
   window.addEventListener('message', function (event) {
     if (event.source !== window || event.origin !== window.location.origin) {
@@ -47,6 +59,8 @@
     if (data && data.source === SETTINGS_SOURCE && data.settings && typeof data.settings === 'object') {
       settings.advancedQuery = data.settings.advancedQuery !== false;
       settings.autoFetchNextLink = data.settings.autoFetchNextLink === true;
+      settings.autoFetchMaxPages = positiveInt(data.settings.autoFetchMaxPages, 50, 1000);
+      settings.autoFetchMaxChars = positiveInt(data.settings.autoFetchMaxChars, 10 * 1024 * 1024, 50 * 1024 * 1024);
     }
   });
 
@@ -134,15 +148,16 @@
 
   // -------------------------------------------------- @odata.nextLink pages
 
-  var MAX_PAGES = 50;
-
   /**
    * When the auto-fetch setting is on and a captured GET response is
    * paged, follow the @odata.nextLink chain (replaying the original
    * request's own headers, so authentication keeps working), merge all
    * `value` arrays, and post the combined dataset as an extra entry
-   * marked with the number of pages fetched. Fetching stops at MAX_PAGES
-   * pages or MAX_BODY_CHARS of accumulated JSON, whichever comes first.
+   * marked with the number of pages fetched. Fetching stops at the
+   * configured page-count or data-size limit; if a nextLink remains at
+   * that point the entry is flagged `truncated` (and keeps the leftover
+   * @odata.nextLink) so the panel can warn that the dataset is
+   * incomplete.
    */
   function maybeAutoFetchAllPages(firstEntry, headers, method) {
     if (!settings.autoFetchNextLink || String(method || 'GET').toUpperCase() !== 'GET') {
@@ -159,9 +174,11 @@
     var pages = 1;
     var totalSize = firstEntry.size || 0;
 
-    function finish() {
-      if (pages < 2) {
-        return; // nothing was fetched — the original entry already posted
+    /** remainingNextLink is set when limits (or a fetch error) stopped
+     *  the chain while more data was still available. */
+    function finish(remainingNextLink) {
+      if (pages < 2 && !remainingNextLink) {
+        return; // chain completed on page 1 — the original entry suffices
       }
       var combined = {};
       for (var key in firstJson) {
@@ -169,11 +186,15 @@
           combined[key] = firstJson[key];
         }
       }
+      if (remainingNextLink) {
+        combined['@odata.nextLink'] = remainingNextLink;
+      }
       combined.value = combinedValue;
       var entry = makeEntry(method, firstEntry.url, firstEntry.status);
       entry.json = combined;
       entry.size = totalSize;
       entry.pages = pages;
+      entry.truncated = !!remainingNextLink;
       post(entry);
     }
 
@@ -185,14 +206,18 @@
         finish();
         return;
       }
-      if (!isGraphHost(parsed.hostname) || pages >= MAX_PAGES || totalSize > MAX_BODY_CHARS) {
+      if (!isGraphHost(parsed.hostname)) {
         finish();
+        return;
+      }
+      if (pages >= settings.autoFetchMaxPages || totalSize > settings.autoFetchMaxChars) {
+        finish(nextUrl);
         return;
       }
       originalFetch(nextUrl, { headers: headers })
         .then(function (response) {
           if (!response.ok) {
-            finish();
+            finish(nextUrl);
             return;
           }
           response
@@ -202,11 +227,11 @@
               try {
                 pageJson = JSON.parse(text);
               } catch (e) {
-                finish();
+                finish(nextUrl);
                 return;
               }
               if (!pageJson || !Array.isArray(pageJson.value)) {
-                finish();
+                finish(nextUrl);
                 return;
               }
               totalSize += text.length;
@@ -218,9 +243,13 @@
                 finish();
               }
             })
-            .catch(finish);
+            .catch(function () {
+              finish(nextUrl);
+            });
         })
-        .catch(finish);
+        .catch(function () {
+          finish(nextUrl);
+        });
     }
 
     step(firstJson['@odata.nextLink']);

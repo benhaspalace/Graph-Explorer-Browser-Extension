@@ -24,16 +24,22 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
 - **Automatic sign-in** — opening Graph Explorer while signed out clicks the
   profile view for you to start the sign-in flow (on by default; your browser
   may ask you to allow the sign-in popup).
-- **Auto-fetch all pages** *(opt-in)* — follow the `@odata.nextLink` chain (up
-  to 50 pages) and add the combined dataset to the response list, so you can
-  query the entire result set at once. The extension replays the original
-  request's own headers for the follow-up pages; nothing is stored.
+- **Auto-fetch all pages** *(opt-in)* — follow the `@odata.nextLink` chain and
+  add the combined dataset to the response list, so you can query the entire
+  result set at once. The page-count and data-size limits are configurable
+  (defaults: 50 pages / 10 MB); if a query exceeds them the combined entry is
+  marked *incomplete* and the panel shows a warning. The extension replays the
+  original request's own headers for the follow-up pages; nothing is stored.
 - **Response history** — the last 25 Graph responses are kept (in memory
   only); pick any of them from the dropdown to query it.
 - **Query history** — queries you run (Enter, or clicking a suggestion) are
   saved with a timestamp and the Graph request they ran against. The history
   size is configurable in the settings (default 50, or unlimited). Clicking a
-  saved query restores it — including its query language.
+  saved query restores it — including its query language — and the **Load ↗**
+  button re-populates Graph Explorer's request editor with the saved method
+  and URL: in place when the method already matches, otherwise via Graph
+  Explorer's own share-link format (`?request=…&method=…&version=…`), the same
+  mechanism its built-in history uses.
 - **Smart suggestions** — one-click query chips generated from the shape of
   the current response in the selected language, plus a built-in cheat sheet.
 - **Export as JSON or CSV** — a format switch in the footer controls both
@@ -83,6 +89,7 @@ Click the toolbar icon to open the settings popup:
 | Advanced queries | on | Adds `ConsistencyLevel: eventual` + `$count=true` to `$filter`/`$search`/`$orderby` GET requests |
 | Auto sign-in | on | Starts the sign-in flow when you open Graph Explorer signed out |
 | Auto-fetch all pages | off | Follows `@odata.nextLink` and adds the combined dataset to the response list |
+| Auto-fetch limits | 50 pages / 10 MB | Stops the chain at these limits; the panel warns when a dataset was cut off |
 | Query history limit | 50 | How many distinct queries to keep (checkbox for unlimited) |
 
 ### Query examples (JMESPath)

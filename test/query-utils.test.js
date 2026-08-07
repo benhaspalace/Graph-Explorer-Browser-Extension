@@ -170,6 +170,36 @@ test('every suggested JSONPath query is valid against the source data', () => {
   }
 });
 
+test('parseGraphRequest splits Graph URLs into deep-link parts', () => {
+  assert.deepEqual(GEJQ.parseGraphRequest('https://graph.microsoft.com/v1.0/me/messages?$top=5'), {
+    graphUrl: 'https://graph.microsoft.com',
+    version: 'v1.0',
+    request: 'me/messages?$top=5'
+  });
+  assert.deepEqual(GEJQ.parseGraphRequest('https://graph.microsoft.us/beta/users'), {
+    graphUrl: 'https://graph.microsoft.us',
+    version: 'beta',
+    request: 'users'
+  });
+  assert.equal(GEJQ.parseGraphRequest('https://graph.microsoft.com/v2.0/users'), null);
+  assert.equal(GEJQ.parseGraphRequest('https://graph.microsoft.com/v1.0'), null);
+  assert.equal(GEJQ.parseGraphRequest('not a url'), null);
+});
+
+test('buildDeepLink produces Graph Explorer share-style links', () => {
+  const link = GEJQ.buildDeepLink(
+    'https://developer.microsoft.com/en-us/graph/graph-explorer',
+    'get',
+    'https://graph.microsoft.com/v1.0/me/messages?$top=5'
+  );
+  assert.equal(
+    link,
+    'https://developer.microsoft.com/en-us/graph/graph-explorer' +
+      '?request=me%2Fmessages%3F%24top%3D5&method=GET&version=v1.0&GraphUrl=https%3A%2F%2Fgraph.microsoft.com'
+  );
+  assert.equal(GEJQ.buildDeepLink('https://x', 'GET', 'https://graph.microsoft.com/v2.0/oops'), null);
+});
+
 test('upsertQueryHistory keeps distinct queries newest-first with timestamps', () => {
   let history = [];
   history = GEJQ.upsertQueryHistory(history, { query: 'a', language: 'jmespath', lastUsed: 1000, context: { method: 'GET', url: '/v1.0/users' } }, 50);
