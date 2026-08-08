@@ -32,7 +32,7 @@
     </label>
     <label>
       <input type="checkbox" id="setting-advanced-query" />
-      <span>Advanced queries: automatically add <code>ConsistencyLevel: eventual</code> and <code>$count=true</code> to requests using <code>$filter</code>, <code>$search</code>, or <code>$orderby</code></span>
+      <span>Advanced queries: when the URI uses <code>$filter</code>, <code>$search</code>, or <code>$orderby</code>, visibly add <code>$count=true</code> to the URI field and a <code>ConsistencyLevel: eventual</code> row to the Request headers view (nothing is changed behind the scenes)</span>
     </label>
     <label>
       <input type="checkbox" id="setting-auto-sign-in" />

@@ -30,6 +30,7 @@
   var STORAGE_KEY_COLLAPSED = 'gejq.embedCollapsed';
   var STORAGE_KEY_FORMAT = 'gejq.exportFormat';
   var STORAGE_KEY_SPLIT = 'gejq.splitPct';
+  var STORAGE_KEY_SHOW_BG = 'gejq.showBackground';
   var STORAGE_KEY_SETTINGS = 'gejq.settings';
   var STORAGE_KEY_QUERY_HISTORY = 'gejq.queryHistory';
   var AUTO_SIGNIN_GUARD = 'gejq.autoSignInAttempted';
@@ -101,6 +102,7 @@
     collapsedPref: false, // user preference: keep the embedded panel hidden
     format: 'json', // export format: 'json' | 'csv'
     splitPct: 50, // width of the embedded panel as % of the results area
+    showBackground: false, // show Graph Explorer's own background requests
     settings: normalizeSettings(null), // fresh mutable copy of the defaults
     queryHistory: [] // executed queries, newest first (persisted)
   };
@@ -109,6 +111,7 @@
   var runTimer = null;
   var embedTimer = null;
   var manualCounter = 0;
+  var lastRunInteraction = 0; // when the user last ran a query in Graph Explorer
 
   // ---------------------------------------------------------------- storage
 
@@ -248,19 +251,30 @@
 
   // ------------------------------------------------------------ query logic
 
+  /** Responses shown in the panel (background ones only when toggled on). */
+  function visibleResponses() {
+    if (state.showBackground) {
+      return state.responses;
+    }
+    return state.responses.filter(function (entry) {
+      return !entry.background;
+    });
+  }
+
   function selectedResponse() {
-    if (state.responses.length === 0) {
+    var list = visibleResponses();
+    if (list.length === 0) {
       return null;
     }
     if (state.followLatest || state.selectedId === null) {
-      return state.responses[0];
+      return list[0];
     }
-    for (var i = 0; i < state.responses.length; i++) {
-      if (state.responses[i].id === state.selectedId) {
-        return state.responses[i];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === state.selectedId) {
+        return list[i];
       }
     }
-    return state.responses[0];
+    return list[0];
   }
 
   /** Evaluate `query` against `json` in the selected query language. */
@@ -463,7 +477,6 @@
         {
           source: SETTINGS_SOURCE,
           settings: {
-            advancedQuery: state.settings.advancedQuery,
             autoFetchNextLink: state.settings.autoFetchNextLink,
             autoFetchMaxPages: state.settings.autoFetchMaxPages,
             autoFetchMaxChars: state.settings.autoFetchMaxMb * 1024 * 1024
@@ -597,49 +610,70 @@
       status += ' · ' + entry.pages + ' pages' + (entry.truncated ? ', incomplete' : '');
     }
     return (
+      (entry.background ? '⚙ ' : '') +
       GEJQ.formatTimestamp(entry.timestamp) +
       ' · ' + entry.method + ' ' + GEJQ.summarizeUrl(entry.url, 60) + ' (' + status + ')'
     );
   }
 
+  function backgroundCount() {
+    return state.responses.filter(function (entry) {
+      return entry.background;
+    }).length;
+  }
+
   function refreshHistorySelect() {
     var select = ui.historySelect;
+    var list = visibleResponses();
     clearChildren(select);
-    if (state.responses.length === 0) {
+    if (list.length === 0) {
       var placeholder = el('option', null, 'Waiting for Graph responses…');
       placeholder.value = '';
       select.appendChild(placeholder);
       select.disabled = true;
-      return;
+    } else {
+      select.disabled = false;
+      list.forEach(function (entry) {
+        var option = el('option', null, optionLabel(entry));
+        option.value = entry.id;
+        select.appendChild(option);
+      });
+      var selected = selectedResponse();
+      select.value = selected ? selected.id : list[0].id;
     }
-    select.disabled = false;
-    state.responses.forEach(function (entry) {
-      var option = el('option', null, optionLabel(entry));
-      option.value = entry.id;
-      select.appendChild(option);
-    });
-    var selected = selectedResponse();
-    select.value = selected ? selected.id : state.responses[0].id;
+
+    // Toggle for Graph Explorer's own background requests.
+    var hidden = backgroundCount();
+    ui.backgroundToggle.style.display = hidden > 0 ? '' : 'none';
+    ui.backgroundToggle.textContent = '⚙ ' + hidden;
+    ui.backgroundToggle.classList.toggle('gejq-seg-active', state.showBackground);
+    ui.backgroundToggle.setAttribute('aria-pressed', state.showBackground ? 'true' : 'false');
+    ui.backgroundToggle.title = state.showBackground
+      ? 'Hide Graph Explorer’s own background requests (profile, organization, permissions)'
+      : hidden + ' background request(s) from Graph Explorer itself are hidden — click to show them';
   }
 
   function addResponse(entry) {
     state.responses.unshift(entry);
     state.responses = GEJQ.trimHistory(state.responses, MAX_HISTORY);
-    if (state.followLatest) {
+    var visible = !entry.background || state.showBackground;
+    if (state.followLatest && visible) {
       state.selectedId = entry.id;
     }
     if (ui) {
       refreshHistorySelect();
       updateBadge();
-      pulseFab();
-      if (state.open && state.followLatest) {
-        runQuery();
+      if (visible) {
+        pulseFab();
+        if (state.open && state.followLatest) {
+          runQuery();
+        }
       }
     }
   }
 
   function updateBadge() {
-    var count = state.responses.length;
+    var count = visibleResponses().length;
     ui.fabBadge.textContent = count > 99 ? '99+' : String(count);
     ui.fabBadge.style.display = count > 0 ? '' : 'none';
   }
@@ -683,6 +717,163 @@
 
   // ------------------------------------------------ populate Graph Explorer
 
+  /** Graph Explorer's URI field (localized aria-label + structural fallback). */
+  function findEditorInput() {
+    return (
+      document.querySelector('input[aria-label="Query sample input" i]') ||
+      document.querySelector('#request-area input[type="text"]')
+    );
+  }
+
+  /**
+   * Track when the user deliberately runs a query — clicking Graph
+   * Explorer's Run button (or anything in the request bar) or pressing
+   * Enter in the URI field. Used as a signal to tell user-run queries
+   * apart from Graph Explorer's own background requests.
+   */
+  function trackRunInteractions() {
+    document.addEventListener(
+      'click',
+      function (event) {
+        var node = event.target && event.target.closest ? event.target.closest('button') : null;
+        if (!node) {
+          return;
+        }
+        var label = (node.getAttribute('aria-label') || node.textContent || '').toLowerCase();
+        if (label.indexOf('run query') !== -1 || node.closest('#request-area')) {
+          lastRunInteraction = Date.now();
+        }
+      },
+      true
+    );
+    document.addEventListener(
+      'keydown',
+      function (event) {
+        if (event.key === 'Enter' && event.target === findEditorInput()) {
+          lastRunInteraction = Date.now();
+        }
+      },
+      true
+    );
+    // Leaving the URI field (including via a click on Run, which blurs
+    // it first) is the moment to apply visible advanced-query help.
+    document.addEventListener(
+      'blur',
+      function (event) {
+        if (event.target === findEditorInput()) {
+          maybeAssistAdvancedQuery();
+        }
+      },
+      true
+    );
+  }
+
+  // ------------------------------------------------ advanced query assist
+
+  var HEADER_ADDED_GUARD = 'gejq.consistencyHeaderAdded';
+
+  /**
+   * Visible advanced-query assistance: when the URI field holds a GET
+   * query using $filter/$search/$orderby (or $count), append $count=true
+   * to the field itself and add a `ConsistencyLevel: eventual` row via
+   * Graph Explorer's own Request-headers view. Nothing is modified
+   * behind the user's back — both changes are visible in the query view
+   * before the request runs. Triggered when the URI field loses focus.
+   */
+  function maybeAssistAdvancedQuery() {
+    if (!state.settings.advancedQuery) {
+      return;
+    }
+    var input = findEditorInput();
+    if (!input || input.value.trim() === '') {
+      return;
+    }
+    var methodControl = document.querySelector('[aria-label="HTTP request method option" i]');
+    var method = methodControl && methodControl.textContent ? methodControl.textContent.trim() : 'GET';
+    var advanced = GEJQ.applyAdvancedQuery(input.value.trim(), method);
+    if (!advanced.addHeader) {
+      return;
+    }
+    if (!/[?&]\$count=/i.test(input.value)) {
+      // Append as text so the user's own formatting stays intact.
+      setNativeInputValue(input, input.value + (input.value.indexOf('?') === -1 ? '?' : '&') + '$count=true');
+    }
+    ensureConsistencyHeaderRow();
+  }
+
+  /**
+   * Add `ConsistencyLevel: eventual` through Graph Explorer's
+   * Request-headers tab so the header is visible (and persisted by GE)
+   * exactly like a hand-entered one. Best effort: silently does nothing
+   * when the tab or its inputs can't be found, and runs at most once per
+   * tab session.
+   */
+  function ensureConsistencyHeaderRow() {
+    try {
+      if (sessionStorage.getItem(HEADER_ADDED_GUARD)) {
+        return;
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    var headersTab = document.getElementById('request-headers');
+    if (!headersTab) {
+      return;
+    }
+    var previousTab = document.querySelector('[role="tab"][aria-selected="true"]');
+    var restoreTab = previousTab && previousTab !== headersTab ? previousTab : null;
+    headersTab.click();
+    setTimeout(function () {
+      try {
+        var nameInput = document.querySelector('input[name="name"]');
+        var valueInput = document.querySelector('input[name="value"]');
+        if (nameInput && valueInput) {
+          var panelRoot = nameInput.closest('[role="tabpanel"]') || nameInput.parentElement.parentElement;
+          if (panelRoot && panelRoot.textContent.indexOf('ConsistencyLevel') !== -1) {
+            markHeaderAdded(); // user already has the header row
+          } else {
+            setNativeInputValue(nameInput, 'ConsistencyLevel');
+            setNativeInputValue(valueInput, 'eventual');
+            var addButton = findAddButton(panelRoot || document);
+            if (addButton) {
+              addButton.click();
+              markHeaderAdded();
+            }
+          }
+        }
+      } catch (e) {
+        /* never break Graph Explorer */
+      }
+      if (restoreTab) {
+        try {
+          restoreTab.click();
+        } catch (e) {
+          /* ignore */
+        }
+      }
+    }, 150);
+  }
+
+  function findAddButton(scope) {
+    var buttons = scope.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) {
+      var text = (buttons[i].textContent || '').trim().toLowerCase();
+      var label = (buttons[i].getAttribute('aria-label') || '').toLowerCase();
+      if (text === 'add' || label.indexOf('add') !== -1) {
+        return buttons[i];
+      }
+    }
+    return null;
+  }
+
+  function markHeaderAdded() {
+    try {
+      sessionStorage.setItem(HEADER_ADDED_GUARD, '1');
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
   /** Set a React-controlled input's value so the app sees the change. */
   function setNativeInputValue(input, value) {
     var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
@@ -704,11 +895,7 @@
    */
   function populateGraphExplorer(method, url) {
     method = String(method || 'GET').toUpperCase();
-    // The aria-label is localized; #request-area is a stable structural
-    // fallback so the in-place path also works on non-English locales.
-    var input =
-      document.querySelector('input[aria-label="Query sample input" i]') ||
-      document.querySelector('#request-area input[type="text"]');
+    var input = findEditorInput();
     var methodControl = document.querySelector('[aria-label="HTTP request method option" i]');
     var currentMethod = methodControl && methodControl.textContent
       ? methodControl.textContent.trim().toUpperCase()
@@ -1182,10 +1369,20 @@
     historySelect.title = 'Captured Graph responses (newest first)';
     historySelect.addEventListener('change', function () {
       state.selectedId = historySelect.value;
-      state.followLatest = state.responses.length > 0 && state.responses[0].id === historySelect.value;
+      var visible = visibleResponses();
+      state.followLatest = visible.length > 0 && visible[0].id === historySelect.value;
       runQuery();
     });
     historyRow.appendChild(historySelect);
+    var backgroundToggle = button('gejq-bg-toggle', '⚙ 0', '', function () {
+      state.showBackground = !state.showBackground;
+      storageSet(STORAGE_KEY_SHOW_BG, state.showBackground);
+      refreshHistorySelect();
+      updateBadge();
+      runQuery();
+    });
+    backgroundToggle.style.display = 'none';
+    historyRow.appendChild(backgroundToggle);
     panel.appendChild(historyRow);
 
     // Full request line of the selected response: selectable, with a
@@ -1343,6 +1540,7 @@
       panel: panel,
       titleLabel: titleLabel,
       historySelect: historySelect,
+      backgroundToggle: backgroundToggle,
       responseInfo: responseInfo,
       queryInput: queryInput,
       error: error,
@@ -1400,6 +1598,27 @@
     if (payload.json === undefined && !payload.tooLarge) {
       return;
     }
+    // Distinguish user-run queries from Graph Explorer's own background
+    // calls. Aggregated auto-fetch entries inherit the classification of
+    // the first page they extend (their URL may no longer match the URI
+    // field by the time all pages have been fetched).
+    var background;
+    var pages = typeof payload.pages === 'number' ? payload.pages : 0;
+    var priorEntry = pages > 0
+      ? state.responses.filter(function (entry) {
+          return entry.url === payload.url && !entry.pages;
+        })[0]
+      : undefined;
+    if (priorEntry) {
+      background = priorEntry.background === true;
+    } else {
+      var editor = findEditorInput();
+      background = GEJQ.classifyBackgroundRequest(
+        payload.url,
+        editor ? editor.value : '',
+        lastRunInteraction ? Date.now() - lastRunInteraction : -1
+      );
+    }
     addResponse({
       id: payload.id,
       method: typeof payload.method === 'string' ? payload.method : 'GET',
@@ -1408,8 +1627,9 @@
       timestamp: typeof payload.timestamp === 'number' ? payload.timestamp : Date.now(),
       json: payload.json,
       size: typeof payload.size === 'number' ? payload.size : 0,
-      pages: typeof payload.pages === 'number' ? payload.pages : 0,
+      pages: pages,
       truncated: payload.truncated === true,
+      background: background,
       tooLarge: payload.tooLarge === true
     });
   });
@@ -1424,11 +1644,12 @@
       })
       .then(function (css) {
         storageGet(
-          [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FORMAT, STORAGE_KEY_SPLIT, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
+          [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FORMAT, STORAGE_KEY_SPLIT, STORAGE_KEY_SHOW_BG, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
           function (items) {
             state.collapsedPref = items[STORAGE_KEY_COLLAPSED] === true;
             state.format = items[STORAGE_KEY_FORMAT] === 'csv' ? 'csv' : 'json';
             state.splitPct = GEJQ.clampInt(items[STORAGE_KEY_SPLIT], 15, 85, 50);
+            state.showBackground = items[STORAGE_KEY_SHOW_BG] === true;
             state.settings = normalizeSettings(items[STORAGE_KEY_SETTINGS]);
             state.queryHistory = Array.isArray(items[STORAGE_KEY_QUERY_HISTORY])
               ? items[STORAGE_KEY_QUERY_HISTORY]
@@ -1441,6 +1662,7 @@
             }
             pushSettingsToPage();
             maybeAutoSignIn();
+            trackRunInteractions();
           }
         );
       });

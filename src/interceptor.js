@@ -6,11 +6,10 @@
  * Every JSON response coming back from a Microsoft Graph endpoint is
  * forwarded to the extension's content script via window.postMessage.
  *
- * When the "advanced queries" setting is on (the default), outgoing GET
- * requests that use $filter/$search/$orderby/$count are upgraded with
- * the `ConsistencyLevel: eventual` header and `$count=true`, as
- * required by Microsoft Graph advanced queries. The content script
- * pushes setting changes in via window.postMessage.
+ * This script only observes requests (and, for the opt-in auto-fetch
+ * feature, follows @odata.nextLink pages). It never modifies the
+ * queries Graph Explorer sends: the advanced-queries assistance happens
+ * visibly in Graph Explorer's own UI (see content.js).
  *
  * Nothing here leaves the browser: messages stay within the page.
  */
@@ -38,7 +37,6 @@
   // Defaults match the extension's stored defaults; the content script
   // pushes the user's actual settings in shortly after page load.
   var settings = {
-    advancedQuery: true,
     autoFetchNextLink: false,
     autoFetchMaxPages: 50,
     autoFetchMaxChars: 10 * 1024 * 1024
@@ -50,7 +48,6 @@
     }
     var data = event.data;
     if (data && data.source === SETTINGS_SOURCE && data.settings && typeof data.settings === 'object') {
-      settings.advancedQuery = data.settings.advancedQuery !== false;
       settings.autoFetchNextLink = data.settings.autoFetchNextLink === true;
       settings.autoFetchMaxPages = GEJQ.clampInt(data.settings.autoFetchMaxPages, 1, 1000, 50);
       settings.autoFetchMaxChars = GEJQ.clampInt(data.settings.autoFetchMaxChars, 1, 50 * 1024 * 1024, 10 * 1024 * 1024);
@@ -261,75 +258,12 @@
     return undefined;
   }
 
-  /**
-   * Upgrade an outgoing fetch to a Graph advanced query when the setting
-   * is on: append $count=true and add `ConsistencyLevel: eventual` for
-   * GET requests using $filter/$search/$orderby/$count. Only rewrites
-   * direct Graph calls — the anonymous-mode proxy wraps the target URL
-   * and is left untouched. Returns [input, init].
-   */
-  function upgradeRequest(input, init, graphInfo, method) {
-    if (!settings.advancedQuery || typeof GEJQ === 'undefined' || !graphInfo.direct) {
-      return [input, init];
-    }
-    var advanced = GEJQ.applyAdvancedQuery(graphInfo.url, method);
-    if (!advanced.addHeader) {
-      return [input, init];
-    }
-    if (typeof input === 'string' || (input instanceof URL && !(input instanceof Request))) {
-      var headers = new Headers((init && init.headers) || undefined);
-      if (!headers.has('ConsistencyLevel')) {
-        headers.set('ConsistencyLevel', 'eventual');
-      }
-      var newInit = {};
-      for (var key in init) {
-        newInit[key] = init[key];
-      }
-      newInit.headers = headers;
-      return [advanced.url, newInit];
-    }
-    if (input instanceof Request) {
-      var mergedHeaders = new Headers(input.headers);
-      if (init && init.headers) {
-        new Headers(init.headers).forEach(function (headerValue, headerName) {
-          mergedHeaders.set(headerName, headerValue);
-        });
-      }
-      if (!mergedHeaders.has('ConsistencyLevel')) {
-        mergedHeaders.set('ConsistencyLevel', 'eventual');
-      }
-      // GET/HEAD requests carry no body, so all other fields can be
-      // copied from the original Request while swapping the URL.
-      var rebuilt = new Request(advanced.url, {
-        method: input.method,
-        headers: mergedHeaders,
-        mode: input.mode,
-        credentials: input.credentials,
-        cache: input.cache,
-        redirect: input.redirect,
-        referrer: input.referrer,
-        referrerPolicy: input.referrerPolicy,
-        integrity: input.integrity,
-        signal: input.signal
-      });
-      var restInit = {};
-      var changed = false;
-      for (var initKey in init) {
-        if (initKey !== 'headers') {
-          restInit[initKey] = init[initKey];
-          changed = true;
-        }
-      }
-      return [rebuilt, changed ? restInit : undefined];
-    }
-    return [input, init];
-  }
-
   // ---- fetch ----
   var originalFetch = window.fetch;
   if (typeof originalFetch === 'function') {
     window.fetch = function (input, init) {
       var graphUrl = null;
+      var graphInfo = null;
       var method = 'GET';
       try {
         var rawUrl =
@@ -338,27 +272,18 @@
             : input && typeof input.url === 'string'
               ? input.url
               : String(input);
-        var graphInfo = resolveGraphUrl(rawUrl);
+        graphInfo = resolveGraphUrl(rawUrl);
         if (graphInfo) {
           graphUrl = graphInfo.url;
           method =
             (init && init.method) ||
             (input && typeof input === 'object' && input.method) ||
             'GET';
-          var upgraded = upgradeRequest(input, init, graphInfo, method);
-          input = upgraded[0];
-          init = upgraded[1];
-          graphUrl =
-            typeof input === 'string'
-              ? input
-              : input && typeof input.url === 'string'
-                ? input.url
-                : graphUrl;
         }
       } catch (e) {
         /* never break the page's fetch */
       }
-      var result = init === undefined ? originalFetch.call(this, input) : originalFetch.call(this, input, init);
+      var result = originalFetch.apply(this, arguments);
       try {
         if (graphUrl) {
           result

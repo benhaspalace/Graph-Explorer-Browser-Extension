@@ -33,6 +33,7 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   <div id="request">Graph Explorer fixture —
     <button aria-label="HTTP request method option" id="ge-method">GET</button>
     <input aria-label="Query sample input" id="ge-editor-input" size="60" />
+    <button aria-label="Run query" id="ge-run">▶ Run query</button>
     <button aria-label="Sign in" id="fake-profile-view">(avatar)</button>
   </div>
   <div id="response-area"><div id="ge-response"><pre id="ge-json">(run a query)</pre></div></div>
@@ -42,15 +43,23 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   document.getElementById('fake-profile-view').addEventListener('click', function () {
     window.__signInClicks++;
   });
-  // Mimic Graph Explorer running a query.
+  // Mimic Graph Explorer running a query: the URI field always holds the
+  // query being run (that's how the extension tells user queries apart
+  // from Graph Explorer's own background calls).
   window.runGraphQuery = function (path) {
-    return fetch('https://graph.microsoft.com' + (path || '/v1.0/users?$top=3'), {
+    var url = 'https://graph.microsoft.com' + (path || '/v1.0/users?$top=3');
+    document.getElementById('ge-editor-input').value = url;
+    return fetch(url, {
       headers: { Accept: 'application/json' }
     }).then(r => r.json()).then(j => {
       document.getElementById('ge-json').textContent = JSON.stringify(j, null, 2);
       return j;
     });
   };
+  document.getElementById('ge-run').addEventListener('click', function () {
+    var url = document.getElementById('ge-editor-input').value;
+    window.runGraphQuery(url.replace('https://graph.microsoft.com', ''));
+  });
 </script>
 </body></html>`;
 
@@ -268,15 +277,43 @@ function check(name, ok, extra) {
   const meta = await page.locator('.gejq-meta').innerText();
   check('meta line describes result', meta.includes('array'), meta);
 
-  // Advanced-query setting (default on): $filter GET requests gain
-  // ConsistencyLevel: eventual and $count=true; plain GETs stay untouched.
-  await page.evaluate(() => window.runGraphQuery("/v1.0/users?$filter=startswith(displayName,'a')"));
+  // Advanced-query setting (default on): leaving the URI field with a
+  // $filter query visibly appends $count=true to the field itself (the
+  // ConsistencyLevel header goes through GE's Request-headers view,
+  // which this fixture doesn't have — the assist must not crash without
+  // it). Nothing is rewritten at the network layer.
+  await page.evaluate(() => {
+    const editor = document.getElementById('ge-editor-input');
+    editor.value = "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'a')";
+    editor.focus();
+  });
+  await page.locator('#ge-json').click(); // blur the URI field
+  await page.waitForTimeout(400);
+  const editorAfterAssist = await page.evaluate(() => document.getElementById('ge-editor-input').value);
+  check(
+    'advanced query visibly gains $count=true in the URI field',
+    editorAfterAssist === "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'a')&$count=true",
+    editorAfterAssist
+  );
+  await page.locator('#ge-run').click(); // run it — the field content is what goes out
   await page.waitForTimeout(400);
   const advReq = graphRequests.find((r) => r.url.includes('%24filter') || r.url.includes('$filter'));
-  check('advanced query got ConsistencyLevel header', !!advReq && advReq.headers['consistencylevel'] === 'eventual', JSON.stringify(advReq && advReq.headers['consistencylevel']));
-  check('advanced query got $count=true', !!advReq && /[$%]24count=true|\$count=true/.test(advReq.url), advReq && advReq.url);
+  check('the visible $count=true is what got sent', !!advReq && /[$%]24count=true|\$count=true/.test(advReq.url), advReq && advReq.url);
+  check('no hidden header was injected', !!advReq && advReq.headers['consistencylevel'] === undefined);
   const plainReq = graphRequests.find((r) => r.url.includes('$top=3'));
   check('plain query left untouched', !!plainReq && !plainReq.url.includes('count') && plainReq.headers['consistencylevel'] === undefined);
+  // A plain query must not be touched when leaving the field either.
+  await page.evaluate(() => {
+    const editor = document.getElementById('ge-editor-input');
+    editor.value = 'https://graph.microsoft.com/v1.0/users?$top=3';
+    editor.focus();
+  });
+  await page.locator('#ge-json').click();
+  await page.waitForTimeout(300);
+  check(
+    'plain query URI field not touched by the assist',
+    (await page.evaluate(() => document.getElementById('ge-editor-input').value)) === 'https://graph.microsoft.com/v1.0/users?$top=3'
+  );
 
   // Auto sign-in: the fixture's profile-view button must get clicked once.
   check('auto sign-in clicked the profile view', (await page.evaluate(() => window.__signInClicks)) === 1);
@@ -533,6 +570,50 @@ function check(name, ok, extra) {
     };
   });
   check('query input matches language selector height', Math.abs(inputHeights.input - inputHeights.select) <= 2, JSON.stringify(inputHeights));
+
+  // 10l. Graph Explorer's own background calls are hidden behind a toggle.
+  const optionCountBefore = await page.evaluate(
+    () => document.getElementById('gejq-host').shadowRoot.querySelectorAll('.gejq-history-select option').length
+  );
+  // Internal-style call: URL not in the URI field, no run interaction.
+  await page.evaluate(() => fetch('https://graph.microsoft.com/v1.0/organization').then((r) => r.json()));
+  await page.waitForTimeout(600);
+  const bgState = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      options: shadow.querySelectorAll('.gejq-history-select option').length,
+      toggleVisible: shadow.querySelector('.gejq-bg-toggle').style.display !== 'none',
+      toggleText: shadow.querySelector('.gejq-bg-toggle').textContent
+    };
+  });
+  check('background request hidden from the response list', bgState.options === optionCountBefore, `options ${optionCountBefore} → ${bgState.options}`);
+  check('background toggle shows hidden count', bgState.toggleVisible && bgState.toggleText.includes('1'), bgState.toggleText);
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-bg-toggle').click());
+  await page.waitForTimeout(300);
+  const shownBg = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-history-select option')).map((o) => o.textContent);
+  });
+  check('toggle reveals background entry with ⚙ marker', shownBg.some((t) => t.includes('⚙') && t.includes('/v1.0/organization')), shownBg.find((t) => t.includes('⚙')));
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-bg-toggle').click());
+  await page.waitForTimeout(300);
+
+  // A deliberate run of a "background-looking" URL (via the Run button)
+  // stays visible: URI field matches + recent run interaction.
+  await page.evaluate(() => {
+    document.getElementById('ge-editor-input').value = 'https://graph.microsoft.com/v1.0/me';
+  });
+  await page.locator('#ge-run').click();
+  await page.waitForTimeout(600);
+  const meVisible = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-history-select option')).map((o) => o.textContent);
+  });
+  check(
+    'deliberately-run GET /me stays visible',
+    meVisible.some((t) => t.includes('/v1.0/me') && !t.includes('⚙')),
+    meVisible[0]
+  );
 
   // 11. Re-opening the popup within the double-click window opens Graph Explorer.
   const tabsBefore = ctx.pages().length;

@@ -786,6 +786,133 @@
     return { ok: true, query: emitted };
   }
 
+  // Graph Explorer's own AAD client id — its permission-management
+  // requests (oauth2PermissionGrants, servicePrincipals) embed it.
+  var GRAPH_EXPLORER_CLIENT_ID = 'de8bc8b5-d9f9-48b1-a8ad-b748da725064';
+
+  // Exact request URLs (path only, no query string) Graph Explorer
+  // issues on its own after sign-in: signed-in user, profile type,
+  // tenant organization.
+  var BACKGROUND_PATHS = ['/v1.0/me', '/beta/me/profile', '/beta/me/photo/$value', '/v1.0/organization'];
+
+  /**
+   * True when a captured request looks like one of Graph Explorer's own
+   * background calls (sign-in profile/organization lookups, permission
+   * management) rather than a query the user ran. Note the ambiguity: a
+   * deliberately-run plain `GET /me` matches too — the panel keeps such
+   * entries behind a "background" toggle instead of dropping them.
+   */
+  function isBackgroundGraphRequest(url) {
+    var parsed;
+    try {
+      parsed = new URL(url);
+    } catch (e) {
+      return false;
+    }
+    var path = parsed.pathname.replace(/\/+$/, '').toLowerCase();
+    if (parsed.search === '' && BACKGROUND_PATHS.indexOf(path) !== -1) {
+      return true;
+    }
+    var query;
+    try {
+      query = decodeURIComponent(parsed.search).toLowerCase();
+    } catch (e) {
+      query = parsed.search.toLowerCase();
+    }
+    if (query.indexOf(GRAPH_EXPLORER_CLIENT_ID) !== -1) {
+      return true; // permission grants / service principal lookups for GE itself
+    }
+    if (/\/oauth2permissiongrants(\/|$)/.test(path) || /\/serviceprincipals(\/|$)/.test(path)) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * True when a captured request URL corresponds to the query currently
+   * sitting in Graph Explorer's URI field — the strongest signal that
+   * the user ran it deliberately. Tolerates encoding differences and the
+   * extra `$count=true` the advanced-query setting injects.
+   */
+  function graphRequestMatchesEditor(capturedUrl, editorValue) {
+    if (!editorValue || typeof editorValue !== 'string') {
+      return false;
+    }
+    var captured;
+    try {
+      captured = new URL(capturedUrl);
+    } catch (e) {
+      return false;
+    }
+    var editor = null;
+    var trimmed = editorValue.trim();
+    try {
+      editor = new URL(trimmed);
+    } catch (e) {
+      try {
+        editor = new URL(trimmed, captured.origin);
+      } catch (e2) {
+        return false;
+      }
+    }
+    if (captured.origin.toLowerCase() !== editor.origin.toLowerCase()) {
+      return false;
+    }
+    var capturedPath = captured.pathname.replace(/\/+$/, '').toLowerCase();
+    var editorPath = editor.pathname.replace(/\/+$/, '').toLowerCase();
+    if (capturedPath !== editorPath) {
+      return false;
+    }
+    var capturedParams = {};
+    captured.searchParams.forEach(function (value, key) {
+      capturedParams[key.toLowerCase()] = value;
+    });
+    var mismatch = false;
+    var seen = {};
+    editor.searchParams.forEach(function (value, key) {
+      var k = key.toLowerCase();
+      if (!(k in capturedParams) || capturedParams[k] !== value) {
+        mismatch = true;
+      }
+      seen[k] = true;
+    });
+    if (mismatch) {
+      return false;
+    }
+    var extras = Object.keys(capturedParams).filter(function (k) {
+      return !seen[k] && !(k === '$count' && capturedParams[k] === 'true');
+    });
+    return extras.length === 0;
+  }
+
+  /**
+   * Decide whether a captured Graph request is one of Graph Explorer's
+   * own background calls, combining three signals:
+   *  - known-internal URL patterns (profile, organization, permission
+   *    grants, service principals),
+   *  - whether the URL matches the query in Graph Explorer's URI field,
+   *  - whether the user recently ran a query (Run button / Enter),
+   *    passed as msSinceRun (-1 = never).
+   * The URI field alone is not enough: it is pre-filled with /v1.0/me,
+   * which is exactly what Graph Explorer fetches on sign-in — hence
+   * pattern matches also require a recent run to count as user-driven.
+   * Unknown URLs that match neither the field nor a recent run are
+   * treated as background too (Graph Explorer may add new internal
+   * calls); the panel keeps them behind a toggle rather than dropping
+   * them, so a misclassification is always recoverable.
+   */
+  function classifyBackgroundRequest(url, editorValue, msSinceRun) {
+    var recentRun = typeof msSinceRun === 'number' && msSinceRun >= 0 && msSinceRun < 15000;
+    var editorMatch = graphRequestMatchesEditor(url, editorValue);
+    if (isBackgroundGraphRequest(url)) {
+      return !(editorMatch && recentRun);
+    }
+    if (editorMatch) {
+      return false;
+    }
+    return !recentRun;
+  }
+
   /**
    * Split a Graph API URL into the parts Graph Explorer's deep-link
    * format uses: { graphUrl, version, request }. Returns null when the
@@ -1119,6 +1246,9 @@
     jqKey: jqKey,
     clampInt: clampInt,
     convertQuery: convertQuery,
+    isBackgroundGraphRequest: isBackgroundGraphRequest,
+    graphRequestMatchesEditor: graphRequestMatchesEditor,
+    classifyBackgroundRequest: classifyBackgroundRequest,
     applyAdvancedQuery: applyAdvancedQuery,
     parseGraphRequest: parseGraphRequest,
     buildDeepLink: buildDeepLink,

@@ -391,6 +391,76 @@ test('groupQueryHistory orders favorites, tag groups, then recent', () => {
   assert.deepEqual(GEJQ.groupQueryHistory([]), []);
 });
 
+test('isBackgroundGraphRequest flags Graph Explorer internals only', () => {
+  const background = [
+    'https://graph.microsoft.com/v1.0/me',
+    'https://graph.microsoft.com/beta/me/profile',
+    'https://graph.microsoft.com/v1.0/organization',
+    "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?$filter=clientId eq 'x'",
+    'https://graph.microsoft.com/v1.0/oauth2PermissionGrants/abc123',
+    "https://graph.microsoft.com/v1.0/servicePrincipals?$filter=appId eq 'de8bc8b5-d9f9-48b1-a8ad-b748da725064'",
+    'https://graph.microsoft.com/v1.0/users?$filter=id%20eq%20%27de8bc8b5-d9f9-48b1-a8ad-b748da725064%27'
+  ];
+  const userRun = [
+    'https://graph.microsoft.com/v1.0/me?$select=displayName',
+    'https://graph.microsoft.com/v1.0/me/messages',
+    'https://graph.microsoft.com/v1.0/organization?$select=id',
+    'https://graph.microsoft.com/v1.0/users?$top=5',
+    'pasted JSON #1'
+  ];
+  for (const url of background) {
+    assert.equal(GEJQ.isBackgroundGraphRequest(url), true, url);
+  }
+  for (const url of userRun) {
+    assert.equal(GEJQ.isBackgroundGraphRequest(url), false, url);
+  }
+});
+
+test('graphRequestMatchesEditor tolerates encoding and injected $count', () => {
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor(
+      "https://graph.microsoft.com/v1.0/users?%24filter=startswith(displayName%2C'a')&%24count=true",
+      "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'a')"
+    ),
+    true
+  );
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor('https://graph.microsoft.com/v1.0/me', 'https://graph.microsoft.com/v1.0/me'),
+    true
+  );
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor('https://graph.microsoft.com/v1.0/me', 'https://graph.microsoft.com/v1.0/users'),
+    false
+  );
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor(
+      'https://graph.microsoft.com/v1.0/users?$top=5',
+      'https://graph.microsoft.com/v1.0/users?$top=10'
+    ),
+    false
+  );
+  assert.equal(GEJQ.graphRequestMatchesEditor('https://graph.microsoft.com/v1.0/me', ''), false);
+  assert.equal(GEJQ.graphRequestMatchesEditor('not a url', 'https://graph.microsoft.com/v1.0/me'), false);
+});
+
+test('classifyBackgroundRequest combines pattern, editor, and run signals', () => {
+  const ME = 'https://graph.microsoft.com/v1.0/me';
+  const ORG = 'https://graph.microsoft.com/v1.0/organization';
+  const USERS = 'https://graph.microsoft.com/v1.0/users?$top=5';
+  // Sign-in burst: /me matches the pre-filled field but nothing was run.
+  assert.equal(GEJQ.classifyBackgroundRequest(ME, ME, -1), true);
+  // Deliberately running GET /me: field matches and a run just happened.
+  assert.equal(GEJQ.classifyBackgroundRequest(ME, ME, 500), false);
+  // Internal organization lookup while the field shows something else.
+  assert.equal(GEJQ.classifyBackgroundRequest(ORG, USERS, 500), true);
+  // Normal user query matching the field, even without a tracked run.
+  assert.equal(GEJQ.classifyBackgroundRequest(USERS, USERS, -1), false);
+  // Unknown call matching neither field nor a recent run stays hidden.
+  assert.equal(GEJQ.classifyBackgroundRequest('https://graph.microsoft.com/v1.0/whatever', USERS, -1), true);
+  // …but a recent run rescues unknown non-pattern URLs (field edited).
+  assert.equal(GEJQ.classifyBackgroundRequest('https://graph.microsoft.com/v1.0/whatever', USERS, 500), false);
+});
+
 test('clampInt clamps numbers and numeric strings, falls back otherwise', () => {
   assert.equal(GEJQ.clampInt(5, 1, 10, 3), 5);
   assert.equal(GEJQ.clampInt(99, 1, 10, 3), 10);
