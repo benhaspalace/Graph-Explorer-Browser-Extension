@@ -764,9 +764,16 @@
   color: var(--gejq-error);
 }
 
-.gejq-action-small {
+/* CSV/TSV copy-format dropdown in the footer (shown only in CSV mode). */
+.gejq-copy-format {
   flex: 0 0 auto;
-  min-width: 44px;
+  height: 28px;
+  padding: 0 4px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  font-size: 12px;
 }
 
 .gejq-tag-input {

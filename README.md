@@ -6,6 +6,16 @@ Run a Graph query, then filter, reshape, sort, and export the JSON response
 with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI's
 `--query` option — or with [JSONPath](https://github.com/JSONPath-Plus/JSONPath).
 
+## Build & test status
+
+The **Build** workflow runs the unit tests, the offline end-to-end smoke
+test, and the packaging step on every push. Status per branch:
+
+| Branch | Build & tests |
+| --- | --- |
+| `main` | [![Build (main)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml?query=branch%3Amain) |
+| `claude/graph-explorer-json-query-9xez2b` | [![Build (claude/graph-explorer-json-query-9xez2b)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml/badge.svg?branch=claude/graph-explorer-json-query-9xez2b)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml?query=branch%3Aclaude%2Fgraph-explorer-json-query-9xez2b) |
+
 ![The query panel embedded in Graph Explorer's results area](docs/screenshot.png)
 
 ## Features
@@ -36,14 +46,13 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   pieces [Microsoft Graph advanced queries](https://learn.microsoft.com/graph/aad-advanced-queries)
   require. Everything happens in the query view itself; requests are never
   modified behind the scenes. On by default; toggle it in the settings.
-- **Query editor** — a plain, dependable text box by default. Turn on
-  **Syntax-highlighting query editor** in the settings to switch to a
-  CodeMirror 6 editor with per-language highlighting (strings, numbers,
-  functions, `@`/`$` references, properties), matching-bracket
-  highlighting, auto-closing brackets/quotes, and undo/redo — Shift+Enter
-  then inserts a line break. Either way, Enter runs and saves the query
-  and the box is drag-resizable; switching the setting swaps the editor in
-  place, keeping your current query.
+- **Query editor** — a CodeMirror 6 editor with per-language highlighting
+  (strings, numbers, functions, `@`/`$` references, properties),
+  matching-bracket highlighting, auto-closing brackets/quotes, and
+  undo/redo; Enter runs and saves the query, Shift+Enter inserts a line
+  break, and the box is drag-resizable. Prefer something simpler? Turn off
+  **Syntax-highlighting query editor** in the settings for a plain text
+  box — switching swaps the editor in place, keeping your current query.
 - **Query completion** — typing in the query box opens a completion
   dropdown: property names resolved from the selected response at the path
   before the cursor (`value[].` → `displayName`, `mail`, … with type hints)
@@ -95,15 +104,16 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   how the result renders, and the top-right of the result always shows its
   length and size. **CSV** renders the result as a real table: click a
   column header to sort (numbers sort numerically, missing values last),
-  and **Copy**/**Download** export the CSV *with the applied sorting*; a
-  **TSV** button copies a tab-separated grid that pastes straight into
-  Excel. CSV downloads include a UTF-8 BOM so Excel reads accents
-  correctly, and cell values that begin with `=`, `+`, `-`, or `@` are
-  prefixed with an apostrophe so a crafted Graph field (e.g. a display name)
-  can't run as a spreadsheet formula. **Tree** shows a collapsible tree of the current result —
-  click any property to use its path as the query (with a query already in
-  the box, the click composes: `.value` + a click on `displayName` →
-  `.value | .[].displayName`).
+  and **Copy**/**Download** export the table *with the applied sorting*. In
+  CSV mode a small **CSV / TSV** dropdown next to Copy picks the delimiter
+  for both Copy and Download — TSV pastes straight into Excel as a grid.
+  Downloads include a UTF-8 BOM so Excel reads accents correctly, and cell
+  values that begin with `=`, `+`, `-`, or `@` are prefixed with an
+  apostrophe so a crafted Graph field (e.g. a display name) can't run as a
+  spreadsheet formula. **Tree** shows a collapsible tree of the current
+  result — click any property to use its path as the query (with a query
+  already in the box, the click composes: `.value` + a click on
+  `displayName` → `.value | .[].displayName`).
 - **Compare responses (⇄)** — toggle diff mode to see what changed between
   the current response and any earlier captured one (added / removed /
   changed, with paths). Your query is applied to both sides first, so you
@@ -177,7 +187,7 @@ Click the toolbar icon to open the settings popup:
 | Auto-fetch all pages | off | Follows `@odata.nextLink` and adds the combined dataset to the response list |
 | Auto-fetch limits | 50 pages / 10 MB | Stops the chain at these limits; the panel warns when a dataset was cut off |
 | Show background requests | off | Reveal Graph Explorer's own requests in the response list (marked ⚙) |
-| Syntax-highlighting query editor | off | Swap the plain query box for the CodeMirror editor (highlighting, bracket matching, undo) |
+| Syntax-highlighting query editor | on | CodeMirror editor (highlighting, bracket matching, undo); turn off for a plain text box |
 | Query history limit | 50 | How many distinct queries to keep (checkbox for unlimited) |
 
 ### Query examples (JMESPath)
@@ -212,13 +222,12 @@ See the [JMESPath tutorial](https://jmespath.org/tutorial.html) and the
   and `vendor/jqts.js` ([jqts](https://github.com/kentdotn/jqts) 0.0.8, MIT —
   a pure-JS jq clone covering core jq; no WASM needed) evaluate the queries.
 - `vendor/codemirror.js` is a bundled [CodeMirror 6](https://codemirror.net)
-  (MIT) that powers the optional syntax-highlighting query editor; the
+  (MIT) that powers the default syntax-highlighting query editor; the
   tokenizers for the three query languages are the extension's own
-  (`nextQueryToken` in `src/query-utils.js`). The default editor is a plain
-  textarea; the panel also falls back to it if the bundle fails to load. It
-  is mounted with CodeMirror's `root` option pointing at the panel's
-  ShadowRoot so the editor's stylesheet and selection handling work inside
-  the shadow DOM.
+  (`nextQueryToken` in `src/query-utils.js`). Turning the setting off (or
+  the bundle failing to load) falls back to a plain textarea. CodeMirror is
+  mounted with its `root` option pointing at the panel's ShadowRoot so the
+  editor's stylesheet and selection handling work inside the shadow DOM.
 
 ### Privacy
 

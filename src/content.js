@@ -42,7 +42,7 @@
     queryLanguage: 'jmespath',
     historyLimit: 50, // 0 = unlimited
     showBackgroundRequests: false,
-    richEditor: false // opt-in CodeMirror editor; plain textarea by default
+    richEditor: true // CodeMirror editor by default; can fall back to a plain textarea
   });
   // The signed-out "profile view" button in Graph Explorer's top bar —
   // clicking it starts the sign-in flow.
@@ -102,6 +102,7 @@
     open: false, // panel visible (embedded: expanded; floating: drawer open)
     collapsedPref: false, // user preference: keep the embedded panel hidden
     format: 'json', // result view + export format: 'json' | 'csv' | 'tree'
+    copyFormat: 'csv', // delimiter for Copy/Download in CSV mode: 'csv' | 'tsv'
     tableSort: { column: null, dir: 1 }, // table-view sorting (csv mode)
     lastValue: undefined, // last successful query result (sort re-render)
     lastRenderKey: '', // response id + query — resets table sorting
@@ -696,12 +697,20 @@
     var response = selectedResponse();
     var sourceUrl = response ? response.url : '';
     if (state.format === 'csv') {
-      // Export what the table shows — the applied sorting included.
-      var csv = GEJQ.toCsv(sortedTableRows(outcome.value));
-      if (csv === null) {
+      // Export what the table shows — the applied sorting included — in the
+      // delimiter the copy-format dropdown selects (CSV or TSV).
+      var rows = sortedTableRows(outcome.value);
+      var tsv = state.copyFormat === 'tsv';
+      var text = tsv ? GEJQ.toTsv(rows) : GEJQ.toCsv(rows);
+      if (text === null) {
         return null;
       }
-      return { text: csv, filename: GEJQ.exportFilename(sourceUrl, 'csv'), mime: 'text/csv' };
+      return {
+        text: text,
+        filename: GEJQ.exportFilename(sourceUrl, tsv ? 'tsv' : 'csv'),
+        mime: tsv ? 'text/tab-separated-values' : 'text/csv',
+        bom: true // UTF-8 BOM so Excel reads accents in both CSV and TSV
+      };
     }
     return {
       text: JSON.stringify(outcome.value, null, 2),
@@ -737,7 +746,9 @@
     var exportable = diffing ? state.diffText !== '' : hasResult && (state.format !== 'csv' || csvOk);
     ui.copyButton.disabled = !exportable;
     ui.downloadButton.disabled = !exportable;
-    ui.tsvButton.disabled = diffing || !csvOk;
+    // The CSV/TSV copy-format dropdown only applies in CSV (table) mode.
+    var showCopyFormat = !diffing && state.format === 'csv' && csvOk;
+    ui.copyFormatSelect.style.display = showCopyFormat ? '' : 'none';
   }
 
   function setFormat(format) {
@@ -761,7 +772,7 @@
       queryLanguage: raw && LANGUAGES[raw.queryLanguage] ? raw.queryLanguage : DEFAULT_SETTINGS.queryLanguage,
       historyLimit: historyLimit,
       showBackgroundRequests: !!raw && raw.showBackgroundRequests === true,
-      richEditor: !!raw && raw.richEditor === true
+      richEditor: !raw || raw.richEditor !== false
     };
   }
 
@@ -2650,25 +2661,32 @@
         copyText(payload.text, copyButton, 'Copied ✓');
       }
     });
-    var tsvButton = button('gejq-action gejq-action-small', 'TSV', 'Copy as tab-separated values — pastes into Excel as a grid (sorted like the table)', function () {
-      var outcome = currentResult();
-      if (!outcome.error && outcome.value !== undefined) {
-        var tsv = GEJQ.toTsv(sortedTableRows(outcome.value));
-        if (tsv !== null) {
-          copyText(tsv, tsvButton, '✓');
-        }
-      }
+    // In CSV (table) mode, this picks the delimiter for Copy and Download.
+    // Hidden in JSON/Tree modes (see updateExportButtons).
+    var copyFormatSelect = el('select', 'gejq-copy-format');
+    copyFormatSelect.title = 'Copy / Download format';
+    [
+      { value: 'csv', label: 'CSV' },
+      { value: 'tsv', label: 'TSV' }
+    ].forEach(function (choice) {
+      var option = el('option', null, choice.label);
+      option.value = choice.value;
+      copyFormatSelect.appendChild(option);
+    });
+    copyFormatSelect.value = state.copyFormat;
+    copyFormatSelect.addEventListener('change', function () {
+      state.copyFormat = copyFormatSelect.value === 'tsv' ? 'tsv' : 'csv';
     });
     var downloadButton = button('gejq-action', 'Download', 'Download the query result in the selected format', function () {
       var payload = exportPayload();
       if (payload !== null) {
-        // UTF-8 BOM so Excel opens downloaded CSVs with correct accents.
-        var text = payload.mime === 'text/csv' ? '\uFEFF' + payload.text : payload.text;
+        // UTF-8 BOM so Excel opens downloaded CSV/TSV with correct accents.
+        var text = payload.bom ? '\uFEFF' + payload.text : payload.text;
         downloadText(text, payload.filename, payload.mime);
       }
     });
     footer.appendChild(copyButton);
-    footer.appendChild(tsvButton);
+    footer.appendChild(copyFormatSelect);
     footer.appendChild(downloadButton);
     panel.appendChild(footer);
 
@@ -2740,7 +2758,7 @@
       historyFilterRow: historyFilterRow,
       historyTagChips: historyTagChips,
       copyButton: copyButton,
-      tsvButton: tsvButton,
+      copyFormatSelect: copyFormatSelect,
       downloadButton: downloadButton,
       jsonToggle: jsonToggle,
       csvToggle: csvToggle,

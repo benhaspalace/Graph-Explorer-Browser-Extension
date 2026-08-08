@@ -53,7 +53,7 @@ function render(settings) {
   autoFetchPagesInput.value = String(GEJQ.clampInt(settings.autoFetchMaxPages, 1, 1000, 50));
   autoFetchMbInput.value = String(GEJQ.clampInt(settings.autoFetchMaxMb, 1, 50, 10));
   showBackgroundBox.checked = settings.showBackgroundRequests === true;
-  richEditorBox.checked = settings.richEditor === true;
+  richEditorBox.checked = settings.richEditor !== false;
   var limit = typeof settings.historyLimit === 'number' && settings.historyLimit >= 0 ? settings.historyLimit : 50;
   historyUnlimitedBox.checked = limit === 0;
   historyLimitInput.disabled = limit === 0;

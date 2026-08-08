@@ -285,22 +285,49 @@ function check(name, ok, extra) {
   check('graph response captured into history', true);
 
   // 3. Type a JMESPath query, verify the live result. The default editor
-  // is a plain textarea (the CodeMirror editor is opt-in — tested in its
-  // own block below). queryValue reads the textarea's value, or the
-  // CodeMirror container's data-query mirror when the rich editor is on.
-  const query = page.locator('.gejq-query-input');
+  // is CodeMirror (contenteditable); a plain-textarea fallback is behind a
+  // setting and exercised in its own block below. queryValue reads the
+  // CodeMirror container's data-query mirror, or a textarea's value.
+  const query = page.locator('.gejq-query-input .cm-content');
   const queryValue = () =>
     page.evaluate(() => {
       const el = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input');
       return typeof el.value === 'string' ? el.value : el.dataset.query || '';
     });
   check(
-    'plain query editor mounted by default',
-    await page.evaluate(() => {
-      const el = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input');
-      return el && el.tagName === 'TEXTAREA';
-    })
+    'CodeMirror editor mounted by default',
+    await page.evaluate(() => !!document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-editor .cm-editor'))
   );
+
+  // Regression: CodeMirror must be told it lives in the ShadowRoot (the
+  // `root` option). Without it, CM injects its stylesheet into
+  // document.head — invisible to the shadow DOM — so the caret jumps to
+  // position 0 on every edit and the end of the line is unreachable. Type
+  // character-by-character (fill() would hide the bug); closeBrackets
+  // over-types the closing ], so the literal string round-trips exactly
+  // unless the caret is jumping.
+  await query.click();
+  await page.keyboard.press('Control+A');
+  await page.keyboard.press('Delete');
+  await page.keyboard.type('value[0].displayName');
+  await page.waitForTimeout(300);
+  check('CM: incremental typing keeps character order (no caret jump)', (await queryValue()) === 'value[0].displayName', await queryValue());
+  await page.keyboard.type(' too');
+  await page.waitForTimeout(200);
+  check('CM: can keep typing at the end of the query', (await queryValue()) === 'value[0].displayName too', await queryValue());
+  const cmStyled = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const announce = shadow.querySelector('.gejq-query-editor .cm-announced');
+    return {
+      announce: announce ? getComputedStyle(announce).position : 'missing',
+      highlightSpans: shadow.querySelectorAll('.gejq-query-editor .cm-line span[class]').length
+    };
+  });
+  // CM's baseTheme sets .cm-announced to position:fixed (off-screen); any
+  // non-static value proves the stylesheet reached the shadow root.
+  check('CM: stylesheet applied inside the shadow root', cmStyled.announce !== 'static' && cmStyled.announce !== 'missing', JSON.stringify(cmStyled));
+  check('CM: highlights tokens', cmStyled.highlightSpans > 0, JSON.stringify(cmStyled));
+
   await query.fill('value[].{name: displayName, email: mail}');
   await page.waitForTimeout(400);
   const resultText = await page.locator('.gejq-result').innerText();
@@ -479,65 +506,34 @@ function check(name, ok, extra) {
   await page.waitForTimeout(400);
   check('JSONPath query works', (await page.locator('.gejq-result').innerText()).includes('p@x.com'));
 
-  // 8b. The opt-in CodeMirror editor: enabling the setting swaps the plain
-  // textarea for a syntax-highlighting editor, in place, keeping the query.
-  await popup.selectOption('#setting-language', 'jmespath');
+  // 8b. The editor mode is switchable. CodeMirror is the default (verified
+  // in section 3); turning the setting off swaps in a plain textarea in
+  // place, preserving the query, and turning it back on restores CM.
+  await query.fill('$.value[*].mail');
+  await page.waitForTimeout(200);
+  await popup.uncheck('#setting-rich-editor');
+  await page.waitForFunction(
+    () => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input').tagName === 'TEXTAREA',
+    { timeout: 5000 }
+  );
+  check('disabling the setting swaps in the plain textarea', (await queryValue()) === '$.value[*].mail', await queryValue());
+  const plainInput = page.locator('textarea.gejq-query-input');
+  await plainInput.fill('$.value[*].displayName');
   await page.waitForTimeout(300);
-  await query.fill('value[].displayName');
-  await page.waitForTimeout(300);
+  check('plain textarea drives the query', (await page.locator('.gejq-result').innerText()).includes('Pasted Person'));
   await popup.check('#setting-rich-editor');
   await page.waitForFunction(
     () => !!document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-editor .cm-editor'),
     { timeout: 5000 }
   );
   check(
-    'enabling the setting swaps in the CodeMirror editor',
+    're-enabling the setting restores CodeMirror',
     await page.evaluate(() => {
       const el = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input');
       return el && el.classList.contains('gejq-query-editor') && !!el.querySelector('.cm-editor');
     })
   );
-  check('editor swap preserves the query text', (await queryValue()) === 'value[].displayName', await queryValue());
-  const cmContent = page.locator('.gejq-query-editor .cm-content');
-  // Regression: CodeMirror must be told it lives in the ShadowRoot (the
-  // `root` option). Without it, CM injects its stylesheet into
-  // document.head — invisible to the shadow DOM — so the caret jumps to
-  // position 0 on every edit, the end of the line is unreachable, and the
-  // aria-live "announced" region ("Selection deleted") shows through
-  // unstyled. Type character-by-character (fill() would hide the bug);
-  // closeBrackets over-types the closing ], so the literal string
-  // round-trips exactly unless the caret is jumping.
-  await cmContent.click();
-  await page.keyboard.press('Control+A');
-  await page.keyboard.press('Delete');
-  await page.keyboard.type('value[0].displayName');
-  await page.waitForTimeout(300);
-  check('CM: incremental typing keeps character order (no caret jump)', (await queryValue()) === 'value[0].displayName', await queryValue());
-  await page.keyboard.type(' too');
-  await page.waitForTimeout(200);
-  check('CM: can keep typing at the end of the query', (await queryValue()) === 'value[0].displayName too', await queryValue());
-  const cmStyled = await page.evaluate(() => {
-    const shadow = document.getElementById('gejq-host').shadowRoot;
-    const announce = shadow.querySelector('.gejq-query-editor .cm-announced');
-    return {
-      announce: announce ? getComputedStyle(announce).position : 'missing',
-      highlightSpans: shadow.querySelectorAll('.gejq-query-editor .cm-line span[class]').length
-    };
-  });
-  // CM's baseTheme sets .cm-announced to position:fixed (off-screen). Any
-  // non-static value proves the stylesheet reached the shadow root rather
-  // than document.head; a broken root would leave it at the default static.
-  check('CM: stylesheet applied inside the shadow root', cmStyled.announce !== 'static' && cmStyled.announce !== 'missing', JSON.stringify(cmStyled));
-  check('CM: highlights tokens', cmStyled.highlightSpans > 0, JSON.stringify(cmStyled));
-  // Back to the default plain editor for the remaining checks.
-  await popup.uncheck('#setting-rich-editor');
-  await page.waitForFunction(
-    () => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input').tagName === 'TEXTAREA',
-    { timeout: 5000 }
-  );
-  check('disabling the setting restores the plain textarea', (await queryValue()) === 'value[0].displayName too', await queryValue());
-  await popup.selectOption('#setting-language', 'jsonpath');
-  await page.waitForTimeout(300);
+  check('editor swap preserves the query text', (await queryValue()) === '$.value[*].displayName', await queryValue());
   await query.fill('$.value[*].mail');
   await page.waitForTimeout(300);
 
@@ -913,10 +909,68 @@ function check(name, ok, extra) {
     () => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-table tbody tr').children[1].textContent
   );
   check('second click sorts descending', firstDesc === 'Nestor Wilke', firstDesc);
+  // The CSV/TSV copy-format dropdown replaces the old standalone TSV
+  // button: visible in CSV mode with CSV + TSV options, hidden otherwise.
+  const copyFormatCsv = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const sel = shadow.querySelector('.gejq-copy-format');
+    return {
+      visible: !!sel && sel.style.display !== 'none',
+      options: sel ? Array.from(sel.options).map((o) => o.value) : []
+    };
+  });
   check(
-    'TSV copy enabled for table results',
-    await page.evaluate(() => !document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-action-small').disabled)
+    'CSV mode shows the CSV/TSV copy-format dropdown',
+    copyFormatCsv.visible && copyFormatCsv.options.join(',') === 'csv,tsv',
+    JSON.stringify(copyFormatCsv)
   );
+  await page.locator('.gejq-seg-btn', { hasText: 'JSON' }).click();
+  await page.waitForTimeout(200);
+  check(
+    'copy-format dropdown hidden outside CSV mode',
+    await page.evaluate(() => {
+      const sel = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-copy-format');
+      return sel.style.display === 'none';
+    })
+  );
+  await page.locator('.gejq-seg-btn', { hasText: 'CSV' }).click();
+  await page.waitForTimeout(200);
+  // Selecting TSV makes Copy/Download emit tab-separated output; verify via
+  // the Download path (clipboard isn't available in headless) that the
+  // exported header row switches from comma- to tab-delimited.
+  const downloadedHeader = async (fmt) => {
+    await page.evaluate((f) => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const sel = shadow.querySelector('.gejq-copy-format');
+      sel.value = f;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }, fmt);
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.evaluate(() => {
+        const btns = document.getElementById('gejq-host').shadowRoot.querySelectorAll('.gejq-footer .gejq-action');
+        btns[btns.length - 1].click(); // Download is the last footer action
+      })
+    ]);
+    const stream = await download.createReadStream();
+    let data = '';
+    for await (const chunk of stream) data += chunk;
+    return { name: download.suggestedFilename(), header: data.split('\n')[0] };
+  };
+  const csvDl = await downloadedHeader('csv');
+  const tsvDl = await downloadedHeader('tsv');
+  check(
+    'copy-format dropdown switches CSV vs TSV output',
+    csvDl.header.includes(',') && !csvDl.header.includes('\t') && tsvDl.header.includes('\t'),
+    JSON.stringify({ csv: csvDl.header, tsv: tsvDl.header })
+  );
+  check('download extension follows the copy format', csvDl.name.endsWith('.csv') && tsvDl.name.endsWith('.tsv'), csvDl.name + ' / ' + tsvDl.name);
+  // Leave the dropdown on CSV for any later export checks.
+  await page.evaluate(() => {
+    const sel = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-copy-format');
+    sel.value = 'csv';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  });
 
   // 10n. Tree view: clicking a property composes the path query.
   await page.locator('.gejq-seg-btn', { hasText: 'Tree' }).click();
