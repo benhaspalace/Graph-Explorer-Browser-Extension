@@ -764,3 +764,70 @@ test('vendored jmespath supports the documented example queries', () => {
     'https://graph.microsoft.com/v1.0/users?$skiptoken=abc'
   );
 });
+
+// --------------------------------------------------------- nextQueryToken
+
+/** Tokenize a whole query; returns [text, type] pairs, whitespace skipped. */
+function tokenize(language, text) {
+  const out = [];
+  let pos = 0;
+  while (pos < text.length) {
+    const { end, type } = GEJQ.nextQueryToken(language, text, pos);
+    assert.ok(end > pos, `tokenizer must advance at ${pos} in ${JSON.stringify(text)}`);
+    if (type !== null || text.slice(pos, end).trim() !== '') {
+      out.push([text.slice(pos, end), type]);
+    }
+    pos = end;
+  }
+  return out;
+}
+
+test('nextQueryToken classifies strings, numbers, and brackets', () => {
+  assert.deepEqual(tokenize('jmespath', "value[?age >= 21].name | [0:5]"), [
+    ['value', 'propertyName'],
+    ['[', 'bracket'],
+    ['?', 'operator'],
+    ['age', 'propertyName'],
+    ['>', 'operator'],
+    ['=', 'operator'],
+    ['21', 'number'],
+    [']', 'bracket'],
+    ['.', 'operator'],
+    ['name', 'propertyName'],
+    ['|', 'operator'],
+    ['[', 'bracket'],
+    ['0', 'number'],
+    [':', 'operator'],
+    ['5', 'number'],
+    [']', 'bracket']
+  ]);
+  assert.deepEqual(tokenize('jmespath', "'it''s'")[0], ["'it'", 'string']);
+  assert.deepEqual(tokenize('jmespath', '`{"a": 1}`'), [['`{"a": 1}`', 'string']]);
+  // Unterminated strings extend to the end without looping forever.
+  assert.deepEqual(tokenize('jq', '"unterminated \\'), [['"unterminated \\', 'string']]);
+  assert.deepEqual(tokenize('jq', '3.14'), [['3.14', 'number']]);
+});
+
+test('nextQueryToken marks functions as keywords only where they are calls', () => {
+  // JMESPath: function name followed by ( → keyword; bare name → property.
+  assert.deepEqual(tokenize('jmespath', 'length(value)')[0], ['length', 'keyword']);
+  assert.deepEqual(tokenize('jmespath', 'value[].length')[4], ['length', 'propertyName']);
+  // jq builtins are keywords even bare, but not as .property access.
+  assert.deepEqual(tokenize('jq', '.value | keys')[3], ['keys', 'keyword']);
+  assert.deepEqual(tokenize('jq', '.keys')[1], ['keys', 'propertyName']);
+  assert.deepEqual(tokenize('jq', 'if .a then .b else .c end').filter(([, t]) => t === 'keyword').map(([w]) => w), [
+    'if',
+    'then',
+    'else',
+    'end'
+  ]);
+});
+
+test('nextQueryToken marks @/$ references as variables', () => {
+  assert.deepEqual(tokenize('jsonpath', "$.value[?(@property === 'x')]").filter(([, t]) => t === 'variableName'), [
+    ['$', 'variableName'],
+    ['@property', 'variableName']
+  ]);
+  assert.deepEqual(tokenize('jq', '. as $x | $x')[2], ['$x', 'variableName']);
+  assert.deepEqual(tokenize('jmespath', 'value[?contains(@, `1`)]')[5], ['@', 'variableName']);
+});
