@@ -106,11 +106,14 @@
     };
   }
 
-  function handleBodyText(text, method, url, status) {
+  function handleBodyText(text, method, url, status, requestHeaders) {
     if (typeof text !== 'string' || text.length === 0) {
       return null;
     }
     var entry = makeEntry(method, url, status);
+    if (requestHeaders && requestHeaders.length > 0) {
+      entry.requestHeaders = requestHeaders;
+    }
     if (text.length > MAX_BODY_CHARS) {
       entry.tooLarge = true;
       entry.size = text.length;
@@ -182,6 +185,9 @@
       entry.size = totalSize;
       entry.pages = pages;
       entry.truncated = !!remainingNextLink;
+      if (firstEntry.requestHeaders) {
+        entry.requestHeaders = firstEntry.requestHeaders;
+      }
       post(entry);
     }
 
@@ -258,6 +264,27 @@
     return undefined;
   }
 
+  /**
+   * The request's own headers as sanitized {name, value} pairs — never
+   * including Authorization/cookies (see sanitizeRequestHeaders). Used
+   * so the panel can restore a query's headers later.
+   */
+  function capturedRequestHeaders(input, init) {
+    try {
+      var source = requestHeaders(input, init);
+      if (!source) {
+        return [];
+      }
+      var pairs = [];
+      new Headers(source).forEach(function (value, name) {
+        pairs.push({ name: name, value: value });
+      });
+      return typeof GEJQ !== 'undefined' ? GEJQ.sanitizeRequestHeaders(pairs) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
   // ---- fetch ----
   var originalFetch = window.fetch;
   if (typeof originalFetch === 'function') {
@@ -297,7 +324,8 @@
                   .clone()
                   .text()
                   .then(function (text) {
-                    var entry = handleBodyText(text, method, graphUrl, response.status);
+                    var sanitized = graphInfo && graphInfo.direct ? capturedRequestHeaders(input, init) : [];
+                    var entry = handleBodyText(text, method, graphUrl, response.status, sanitized);
                     if (entry && entry.json && graphInfo && graphInfo.direct) {
                       maybeAutoFetchAllPages(entry, requestHeaders(input, init), method);
                     }

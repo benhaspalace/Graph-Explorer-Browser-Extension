@@ -748,8 +748,23 @@
       },
       true
     );
-    // Leaving the URI field (including via a click on Run, which blurs
-    // it first) is the moment to apply visible advanced-query help.
+    // Apply visible advanced-query help while the user types in the URI
+    // field (debounced), and again when the field loses focus (which
+    // also covers a click on Run — that blurs the field first).
+    var assistTimer = null;
+    document.addEventListener(
+      'input',
+      function (event) {
+        if (event.target !== findEditorInput()) {
+          return;
+        }
+        if (assistTimer) {
+          clearTimeout(assistTimer);
+        }
+        assistTimer = setTimeout(maybeAssistAdvancedQuery, 400);
+      },
+      true
+    );
     document.addEventListener(
       'blur',
       function (event) {
@@ -840,16 +855,89 @@
 
   var HEADER_ADDED_GUARD_PREFIX = 'gejq.headerAdded.';
 
+  /** Poll `condition` every 150ms (up to `tries`); success → onSuccess(result), else onFail(). */
+  function waitForCondition(condition, tries, onSuccess, onFail) {
+    var result = null;
+    try {
+      result = condition();
+    } catch (e) {
+      result = null;
+    }
+    if (result) {
+      onSuccess(result);
+    } else if (tries > 0) {
+      setTimeout(function () {
+        waitForCondition(condition, tries - 1, onSuccess, onFail);
+      }, 150);
+    } else if (onFail) {
+      onFail();
+    }
+  }
+
   /**
-   * Visible advanced-query assistance: when the URI field holds a GET
-   * query using $filter/$search/$orderby (or $count), append $count=true
-   * to the field itself and add `ConsistencyLevel: eventual` plus
-   * `Content-Type: application/json` rows via Graph Explorer's own
+   * On opening Graph Explorer, add the standing headers — ConsistencyLevel
+   * and Content-Type — through its Request-headers view, independent of
+   * what's in the URI. Waits for the app's tab bar to render first.
+   */
+  function scheduleStartupHeaders() {
+    if (!state.settings.advancedQuery) {
+      return;
+    }
+    waitForCondition(
+      findHeadersTab,
+      100, // GE's React app can take a while to boot
+      function () {
+        ensureHeaderRows([
+          { name: 'ConsistencyLevel', value: 'eventual' },
+          { name: 'Content-Type', value: 'application/json' }
+        ]);
+      },
+      null
+    );
+  }
+
+  /**
+   * Insert `$count=true&` directly after the `?` of the URI field. The
+   * insertion happens *before* the caret (which sits at the end while
+   * the user types `$orderby=…`), so the caret is shifted by the
+   * inserted length and typing continues seamlessly.
+   */
+  function insertCountIntoEditor(input) {
+    var value = input.value;
+    var caret = input.selectionStart;
+    var questionMark = value.indexOf('?');
+    var next;
+    var newCaret = caret;
+    if (questionMark === -1) {
+      next = value + '?$count=true';
+    } else {
+      var insertion = '$count=true&';
+      next = value.slice(0, questionMark + 1) + insertion + value.slice(questionMark + 1);
+      if (typeof caret === 'number' && caret > questionMark) {
+        newCaret = caret + insertion.length;
+      }
+    }
+    var hadFocus = document.activeElement === input;
+    setNativeInputValue(input, next);
+    if (hadFocus && typeof newCaret === 'number') {
+      try {
+        input.setSelectionRange(newCaret, newCaret);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  /**
+   * Visible advanced-query assistance: as soon as the URI field holds a
+   * GET query using $filter/$search/$orderby (or $count), insert
+   * $count=true right after the `?` and add `ConsistencyLevel: eventual`
+   * plus `Content-Type: application/json` rows via Graph Explorer's own
    * Request-headers view. Nothing is modified behind the user's back —
-   * every change is visible in the query view before the request runs.
-   * Triggered when the URI field loses focus. Body-carrying methods
-   * (POST/PUT/PATCH) get the Content-Type row even without advanced
-   * query options.
+   * every change lands in the query view before the request runs.
+   * Triggered while typing (debounced) and when the field loses focus.
+   * Body-carrying methods (POST/PUT/PATCH) get the Content-Type row
+   * even without advanced query options.
    */
   function maybeAssistAdvancedQuery() {
     if (!state.settings.advancedQuery) {
@@ -865,8 +953,7 @@
     var rows = [];
     if (advanced.addHeader) {
       if (!/[?&]\$count=/i.test(input.value)) {
-        // Append as text so the user's own formatting stays intact.
-        setNativeInputValue(input, input.value + (input.value.indexOf('?') === -1 ? '?' : '&') + '$count=true');
+        insertCountIntoEditor(input);
       }
       rows.push({ name: 'ConsistencyLevel', value: 'eventual' });
     }
@@ -911,8 +998,12 @@
    * is only marked done once its row is verified present, so failed
    * attempts retry on the next occasion.
    */
-  function ensureHeaderRows(rows) {
+  function ensureHeaderRows(rows, options) {
+    var force = options && options.force === true;
     var pending = rows.filter(function (row) {
+      if (force) {
+        return true; // restore regardless of this session's earlier assists
+      }
       try {
         return !sessionStorage.getItem(HEADER_ADDED_GUARD_PREFIX + row.name);
       } catch (e) {
@@ -928,6 +1019,11 @@
     }
     var previousTab = document.querySelector('[role="tab"][aria-selected="true"]');
     var restoreTab = previousTab && previousTab !== headersTab ? previousTab : null;
+    // This can run while the user is typing in the URI field — remember
+    // focus and caret so they can be handed back afterwards.
+    var editorInput = findEditorInput();
+    var refocusEditor = document.activeElement === editorInput ? editorInput : null;
+    var editorCaret = refocusEditor ? refocusEditor.selectionStart : null;
     headersTab.click();
 
     function finish() {
@@ -938,24 +1034,16 @@
           /* ignore */
         }
       }
-    }
-
-    /** Poll `condition` every 150ms (up to `tries`); then `action(result)`. */
-    function waitFor(condition, tries, action) {
-      var result = null;
-      try {
-        result = condition();
-      } catch (e) {
-        result = null;
-      }
-      if (result) {
-        action(result);
-      } else if (tries > 0) {
-        setTimeout(function () {
-          waitFor(condition, tries - 1, action);
-        }, 150);
-      } else {
-        finish();
+      if (refocusEditor) {
+        try {
+          refocusEditor.focus();
+          if (typeof editorCaret === 'number') {
+            var caret = Math.min(editorCaret, refocusEditor.value.length);
+            refocusEditor.setSelectionRange(caret, caret);
+          }
+        } catch (e) {
+          /* ignore */
+        }
       }
     }
 
@@ -965,7 +1053,7 @@
         return;
       }
       var row = pending[index];
-      waitFor(findHeaderInputs, 10, function (inputs) {
+      waitForCondition(findHeaderInputs, 10, function (inputs) {
         var panelRoot = inputs.name.closest('[role="tabpanel"]') || inputs.name.parentElement.parentElement;
         if (panelRoot && panelRoot.textContent.indexOf(row.name) !== -1) {
           markHeaderAdded(row.name); // already present
@@ -975,7 +1063,7 @@
         setNativeInputValue(inputs.name, row.name);
         setNativeInputValue(inputs.value, row.value);
         // The Add button enables only after React processes the values.
-        waitFor(
+        waitForCondition(
           function () {
             var addButton = findAddButton(panelRoot || document);
             return addButton && !addButton.disabled ? addButton : null;
@@ -984,7 +1072,7 @@
           function (addButton) {
             addButton.click();
             // Only mark done once the row is verified in the panel.
-            waitFor(
+            waitForCondition(
               function () {
                 return panelRoot && panelRoot.textContent.indexOf(row.name) !== -1 ? true : null;
               },
@@ -992,11 +1080,13 @@
               function () {
                 markHeaderAdded(row.name);
                 addNext(index + 1);
-              }
+              },
+              finish
             );
-          }
+          },
+          finish
         );
-      });
+      }, finish);
     }
 
     setTimeout(function () {
@@ -1036,31 +1126,63 @@
   }
 
   /**
-   * Re-populate Graph Explorer's request editor with a saved method +
-   * URL. When the editor's current method already matches, the URL is
-   * written straight into the request input (no reload). Otherwise it
-   * falls back to Graph Explorer's own deep-link format — the same
-   * mechanism its "Share query" and history links use — which reloads
-   * the page with method, version, and resource pre-filled.
+   * Select a method in Graph Explorer's method dropdown by clicking
+   * through its own UI (open the dropdown, click the matching option).
+   * No-op when the method is already selected; best effort otherwise.
    */
-  function populateGraphExplorer(method, url) {
+  function ensureMethodSelected(method) {
+    var control = document.querySelector('[aria-label="HTTP request method option" i]');
+    if (!control) {
+      return;
+    }
+    if ((control.textContent || '').trim().toUpperCase() === method) {
+      return;
+    }
+    control.click();
+    waitForCondition(
+      function () {
+        var options = document.querySelectorAll('[role="option"]');
+        for (var i = 0; i < options.length; i++) {
+          if ((options[i].textContent || '').trim().toUpperCase() === method) {
+            return options[i];
+          }
+        }
+        return null;
+      },
+      6,
+      function (option) {
+        option.click();
+      },
+      function () {
+        try {
+          control.click(); // close the dropdown we opened
+        } catch (e) {
+          /* ignore */
+        }
+      }
+    );
+  }
+
+  /**
+   * Re-populate Graph Explorer's request editor with a saved request —
+   * URL (including query parameters), method, and the sanitized request
+   * headers — purely by writing into Graph Explorer's own UI. No page
+   * navigation: a reload would sign the user out. The version dropdown
+   * follows the URL automatically (Graph Explorer parses it).
+   */
+  function populateGraphExplorer(method, url, headers) {
     method = String(method || 'GET').toUpperCase();
     var input = findEditorInput();
-    var methodControl = document.querySelector('[aria-label="HTTP request method option" i]');
-    var currentMethod = methodControl && methodControl.textContent
-      ? methodControl.textContent.trim().toUpperCase()
-      : null;
-    if (input && currentMethod === method) {
-      setNativeInputValue(input, url);
-      input.focus();
-      return true;
+    if (!input) {
+      return false;
     }
-    var link = GEJQ.buildDeepLink(window.location.origin + window.location.pathname, method, url);
-    if (link) {
-      window.location.assign(link);
-      return true;
+    setNativeInputValue(input, url);
+    input.focus();
+    ensureMethodSelected(method);
+    if (headers && headers.length > 0) {
+      ensureHeaderRows(headers, { force: true });
     }
-    return false;
+    return true;
   }
 
   // ---------------------------------------------------------- query history
@@ -1087,7 +1209,14 @@
         query: query,
         language: state.settings.queryLanguage,
         lastUsed: Date.now(),
-        context: response && !response.manual ? { method: response.method, url: response.url } : null
+        context:
+          response && !response.manual
+            ? {
+                method: response.method,
+                url: response.url,
+                headers: response.requestHeaders || []
+              }
+            : null
       },
       state.settings.historyLimit
     );
@@ -1185,10 +1314,18 @@
     );
 
     if (item.context && item.context.url && GEJQ.parseGraphRequest(item.context.url)) {
+      var headerCount = Array.isArray(item.context.headers) ? item.context.headers.length : 0;
       row.appendChild(
-        button('gejq-chip gejq-load', 'Load ↗', 'Re-populate Graph Explorer with this request (method + URL)', function () {
-          populateGraphExplorer(item.context.method, item.context.url);
-        })
+        button(
+          'gejq-chip gejq-load',
+          'Load ↗',
+          'Re-populate Graph Explorer with this request: method, URL with query parameters' +
+            (headerCount > 0 ? ', and ' + headerCount + ' header(s)' : '') +
+            ' — all in place, no reload',
+          function () {
+            populateGraphExplorer(item.context.method, item.context.url, item.context.headers);
+          }
+        )
       );
     }
     return row;
@@ -1874,6 +2011,14 @@
         lastRunInteraction ? Date.now() - lastRunInteraction : -1
       );
     }
+    var requestHeaders = [];
+    if (Array.isArray(payload.requestHeaders)) {
+      payload.requestHeaders.forEach(function (pair) {
+        if (requestHeaders.length < 20 && pair && typeof pair.name === 'string' && typeof pair.value === 'string') {
+          requestHeaders.push({ name: pair.name, value: pair.value });
+        }
+      });
+    }
     addResponse({
       id: payload.id,
       method: typeof payload.method === 'string' ? payload.method : 'GET',
@@ -1885,6 +2030,7 @@
       pages: pages,
       truncated: payload.truncated === true,
       background: background,
+      requestHeaders: requestHeaders,
       tooLarge: payload.tooLarge === true
     });
   });
@@ -1917,6 +2063,7 @@
             pushSettingsToPage();
             maybeAutoSignIn();
             trackRunInteractions();
+            scheduleStartupHeaders();
           }
         );
       });

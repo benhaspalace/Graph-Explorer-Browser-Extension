@@ -32,6 +32,9 @@ const FIXTURE_HTML = `<!DOCTYPE html>
 <div id="app">
   <div id="request">Graph Explorer fixture —
     <button aria-label="HTTP request method option" id="ge-method">GET</button>
+    <span id="ge-method-list" hidden>
+      <button role="option">GET</button><button role="option">POST</button><button role="option">PATCH</button>
+    </span>
     <input aria-label="Query sample input" id="ge-editor-input" size="60" />
     <button aria-label="Run query" id="ge-run">▶ Run query</button>
     <button aria-label="Sign in" id="fake-profile-view">(avatar)</button>
@@ -59,12 +62,30 @@ const FIXTURE_HTML = `<!DOCTYPE html>
     var url = 'https://graph.microsoft.com' + (path || '/v1.0/users?$top=3');
     document.getElementById('ge-editor-input').value = url;
     return fetch(url, {
-      headers: { Accept: 'application/json' }
+      headers: {
+        Accept: 'application/json',
+        SdkVersion: 'GraphExplorer/4.0',
+        prefer: 'ms-graph-dev-mode',
+        Authorization: 'Bearer secret-token',
+        'x-demo': 'yes'
+      }
     }).then(r => r.json()).then(j => {
       document.getElementById('ge-json').textContent = JSON.stringify(j, null, 2);
       return j;
     });
   };
+  // Method "dropdown": clicking the control shows role=option buttons.
+  var methodBtn = document.getElementById('ge-method');
+  var methodList = document.getElementById('ge-method-list');
+  methodBtn.addEventListener('click', function () {
+    methodList.hidden = !methodList.hidden;
+  });
+  methodList.querySelectorAll('[role="option"]').forEach(function (opt) {
+    opt.addEventListener('click', function () {
+      methodBtn.textContent = opt.textContent;
+      methodList.hidden = true;
+    });
+  });
   document.getElementById('ge-run').addEventListener('click', function () {
     var url = document.getElementById('ge-editor-input').value;
     window.runGraphQuery(url.replace('https://graph.microsoft.com', ''));
@@ -229,6 +250,22 @@ function check(name, ok, extra) {
   const panel = page.locator('.gejq-panel');
   check('panel visible by default', await panel.isVisible());
 
+  // The standing headers are added right when Graph Explorer opens,
+  // independent of any query parameters.
+  await page.waitForTimeout(1500);
+  const startupHeaders = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('#ge-header-list li')).map((li) => li.textContent)
+  );
+  check(
+    'headers added on open (ConsistencyLevel + Content-Type)',
+    startupHeaders.includes('ConsistencyLevel: eventual') && startupHeaders.includes('Content-Type: application/json'),
+    startupHeaders.join(' | ')
+  );
+  check(
+    'previous tab restored after startup header add',
+    await page.evaluate(() => document.getElementById('fake-body-tab').getAttribute('aria-selected') === 'true')
+  );
+
   // Query input must sit above the results box (vertical split).
   const layout = await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
@@ -328,8 +365,8 @@ function check(name, ok, extra) {
   await page.waitForTimeout(400);
   const editorAfterAssist = await page.evaluate(() => document.getElementById('ge-editor-input').value);
   check(
-    'advanced query visibly gains $count=true in the URI field',
-    editorAfterAssist === "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'a')&$count=true",
+    'advanced query visibly gains $count=true right after the ?',
+    editorAfterAssist === "https://graph.microsoft.com/v1.0/users?$count=true&$filter=startswith(displayName,'a')",
     editorAfterAssist
   );
   // The header rows are added through GE's Request-headers view.
@@ -361,6 +398,15 @@ function check(name, ok, extra) {
   check(
     'plain query URI field not touched by the assist',
     (await page.evaluate(() => document.getElementById('ge-editor-input').value)) === 'https://graph.microsoft.com/v1.0/users?$top=3'
+  );
+  // Typing alone (no blur, no run) already triggers the assist.
+  await page.locator('#ge-editor-input').fill('https://graph.microsoft.com/v1.0/users?$orderby=displayName');
+  await page.waitForTimeout(900);
+  check(
+    'assist fires while typing, without leaving the field',
+    (await page.evaluate(() => document.getElementById('ge-editor-input').value)) ===
+      'https://graph.microsoft.com/v1.0/users?$count=true&$orderby=displayName',
+    await page.evaluate(() => document.getElementById('ge-editor-input').value)
   );
 
   // Auto sign-in: the fixture's profile-view button must get clicked once.
@@ -462,6 +508,29 @@ function check(name, ok, extra) {
     editorValue
   );
   check('no page reload happened (in-place path)', !page.url().includes('request='), page.url());
+  // The saved request's sanitized headers are restored through the
+  // Request-headers view; credentials are never captured.
+  await page.waitForTimeout(1600);
+  const restoredHeaders = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('#ge-header-list li')).map((li) => li.textContent)
+  );
+  check('Load restores the saved custom header', restoredHeaders.includes('x-demo: yes'), restoredHeaders.join(' | '));
+  check(
+    'Authorization is never captured or restored',
+    restoredHeaders.every((h) => !h.toLowerCase().includes('authorization') && !h.includes('secret-token'))
+  );
+  // A differing method is restored via GE's own method dropdown.
+  await page.evaluate(() => {
+    document.getElementById('ge-method').textContent = 'POST';
+  });
+  await page.evaluate(() => {
+    document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-history .gejq-load').click();
+  });
+  await page.waitForTimeout(1200);
+  check(
+    'Load restores the saved method via the dropdown',
+    (await page.evaluate(() => document.getElementById('ge-method').textContent.trim())) === 'GET'
+  );
 
   // 10c. Lowering the auto-fetch page limit truncates and warns.
   await popup.fill('#setting-auto-fetch-pages', '2');

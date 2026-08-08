@@ -1202,6 +1202,48 @@
     return extras.length === 0;
   }
 
+  // Never captured: credentials and Graph Explorer's own telemetry
+  // headers (GE re-adds those itself on every request).
+  var DROPPED_REQUEST_HEADERS = ['authorization', 'cookie', 'sdkversion', 'client-request-id'];
+
+  /**
+   * Reduce a request's headers to the ones worth remembering and
+   * restoring: credentials and Graph Explorer telemetry are dropped, and
+   * GE's always-added `ms-graph-dev-mode` preference is stripped out of
+   * the Prefer header (kept only if the user added their own tokens).
+   * Input and output are arrays of { name, value }.
+   */
+  function sanitizeRequestHeaders(pairs) {
+    var out = [];
+    (Array.isArray(pairs) ? pairs : []).forEach(function (pair) {
+      if (out.length >= 20 || !pair || typeof pair.name !== 'string' || typeof pair.value !== 'string') {
+        return;
+      }
+      var name = pair.name.trim();
+      var lower = name.toLowerCase();
+      if (DROPPED_REQUEST_HEADERS.indexOf(lower) !== -1) {
+        return;
+      }
+      var value = pair.value;
+      if (lower === 'prefer') {
+        value = value
+          .split(',')
+          .map(function (token) {
+            return token.trim();
+          })
+          .filter(function (token) {
+            return token !== '' && token !== 'ms-graph-dev-mode';
+          })
+          .join(', ');
+        if (value === '') {
+          return;
+        }
+      }
+      out.push({ name: name, value: value });
+    });
+    return out;
+  }
+
   /**
    * Decide whether a captured Graph request is one of Graph Explorer's
    * own background calls, combining three signals:
@@ -1607,6 +1649,7 @@
     convertQuery: convertQuery,
     queryCompletions: queryCompletions,
     isBackgroundGraphRequest: isBackgroundGraphRequest,
+    sanitizeRequestHeaders: sanitizeRequestHeaders,
     graphRequestMatchesEditor: graphRequestMatchesEditor,
     classifyBackgroundRequest: classifyBackgroundRequest,
     applyAdvancedQuery: applyAdvancedQuery,

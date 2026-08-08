@@ -499,6 +499,30 @@ test('every jq completion compiles in the bundled jqts engine', () => {
   assert.ok(seen.size >= 30, `expected a substantial jq list, got ${seen.size}`);
 });
 
+test('sanitizeRequestHeaders drops credentials and GE telemetry', () => {
+  const sanitized = GEJQ.sanitizeRequestHeaders([
+    { name: 'Authorization', value: 'Bearer secret-token' },
+    { name: 'Cookie', value: 'session=abc' },
+    { name: 'SdkVersion', value: 'GraphExplorer/4.0' },
+    { name: 'client-request-id', value: 'guid' },
+    { name: 'ConsistencyLevel', value: 'eventual' },
+    { name: 'x-custom', value: 'demo' },
+    { name: 'Accept', value: 'application/json' }
+  ]);
+  assert.deepEqual(sanitized.map((h) => h.name), ['ConsistencyLevel', 'x-custom', 'Accept']);
+  assert.ok(!JSON.stringify(sanitized).includes('secret-token'));
+});
+
+test('sanitizeRequestHeaders strips ms-graph-dev-mode from Prefer', () => {
+  assert.deepEqual(GEJQ.sanitizeRequestHeaders([{ name: 'prefer', value: 'ms-graph-dev-mode' }]), []);
+  assert.deepEqual(
+    GEJQ.sanitizeRequestHeaders([{ name: 'Prefer', value: 'ms-graph-dev-mode, outlook.timezone="W. Europe Standard Time"' }]),
+    [{ name: 'Prefer', value: 'outlook.timezone="W. Europe Standard Time"' }]
+  );
+  assert.deepEqual(GEJQ.sanitizeRequestHeaders(null), []);
+  assert.deepEqual(GEJQ.sanitizeRequestHeaders([{ name: 5, value: 'x' }, null]), []);
+});
+
 test('isBackgroundGraphRequest flags Graph Explorer internals only', () => {
   const background = [
     'https://graph.microsoft.com/v1.0/me',

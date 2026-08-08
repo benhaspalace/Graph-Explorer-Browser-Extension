@@ -28,14 +28,13 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   ● live badge while it follows the latest response (re-running your query
   automatically on every new Graph query) or a "pinned" badge when you've
   selected an older response from the dropdown next to it.
-- **Advanced Graph queries by default** — when the URI field holds a GET
-  query using `$filter`, `$search`, or `$orderby`, the extension visibly adds
-  `$count=true` to the URI field and `ConsistencyLevel: eventual` +
-  `Content-Type: application/json` rows to Graph Explorer's Request-headers
-  view — the pieces
-  [Microsoft Graph advanced queries](https://learn.microsoft.com/graph/aad-advanced-queries)
-  require. Body-carrying methods (POST/PUT/PATCH) get the Content-Type row
-  too. Everything happens in the query view itself; requests are never
+- **Advanced Graph queries by default** — when Graph Explorer opens, the
+  extension adds `ConsistencyLevel: eventual` and
+  `Content-Type: application/json` rows to the Request-headers view; and
+  while the URI uses `$filter`, `$search`, or `$orderby`, it inserts
+  `$count=true` right after the `?` as you type (your caret stays put) — the
+  pieces [Microsoft Graph advanced queries](https://learn.microsoft.com/graph/aad-advanced-queries)
+  require. Everything happens in the query view itself; requests are never
   modified behind the scenes. On by default; toggle it in the settings.
 - **Query completion** — typing in the query box opens a completion
   dropdown: property names resolved from the selected response at the path
@@ -65,10 +64,11 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   saved with a timestamp and the Graph request they ran against. The history
   size is configurable in the settings (default 50, or unlimited). Clicking a
   saved query restores it — including its query language — and the **Load ↗**
-  button re-populates Graph Explorer's request editor with the saved method
-  and URL: in place when the method already matches, otherwise via Graph
-  Explorer's own share-link format (`?request=…&method=…&version=…`), the same
-  mechanism its built-in history uses.
+  button re-populates Graph Explorer's request editor with the saved request:
+  URL (query parameters included), method (selected through GE's own
+  dropdown), and the request's sanitized headers (re-added through the
+  Request-headers view). Everything happens in place — no page reload, so
+  your sign-in session is untouched.
 - **Favorites, tags, and filtering** — star ★ a saved query to pin it
   (favorites sit on top and are never trimmed by the history limit), tag 🏷
   queries with your own labels, and filter the expanded history by free
@@ -176,7 +176,10 @@ request's own headers; they are never read, stored, or sent elsewhere.
 Captured responses live only in the page's memory (cleared on reload). What is
 persisted via `chrome.storage.local`: your settings, your last query text,
 panel state, and the query history (query text, language, timestamp, and the
-method + URL of the Graph request it ran against — never response data).
+method, URL, and sanitized headers of the Graph request it ran against —
+never response data). Header sanitization always drops `Authorization`,
+cookies, and Graph Explorer's telemetry headers before anything is kept, so
+access tokens are never read or stored.
 
 ## Development
 
