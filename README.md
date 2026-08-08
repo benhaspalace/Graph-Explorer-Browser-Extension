@@ -194,6 +194,28 @@ Click the toolbar icon to open the settings popup:
 | Syntax-highlighting query editor | on | CodeMirror editor (highlighting, bracket matching, undo); turn off for a plain text box |
 | Query history limit | 50 | How many distinct queries to keep (checkbox for unlimited) |
 
+### Choosing a query language
+
+All three are switchable any time (the selector next to the query box or the
+settings), and switching auto-converts simple path queries. Pick by task:
+
+| | JMESPath *(default)* | JSONPath | jq |
+| --- | --- | --- | --- |
+| **Strengths** | Reshape/project into new objects (`{name: displayName}`), ~26 functions, sort/count; same language as Azure CLI `--query` | Recursive search (`..`) anywhere in the tree; **regex** in filters; simple selection syntax | Most expressive: pipelines, `map`/`select`/`reduce`/`group_by`, arithmetic, string interpolation, build any output shape |
+| **Limitations** | No regex; string tests limited to `contains`/`starts_with`/`ends_with` | **Selection only** — can't reshape or compute new values; result is always the flat array of matches; no `=~` operator | Bundled engine is **core jq only** (jqts) — not every builtin, and **no regex** (`test`/`match`/`gsub` unavailable) |
+| **Best for** | Everyday pluck / filter / reshape / count | Finding & filtering nodes, deep search, regex matching | Complex reshaping and aggregation |
+| **Regex?** | ❌ | ✅ `$.value[?(@.mail.match(/@contoso\.com$/))]` | ❌ |
+| **Example** | `value[?jobTitle == 'Auditor'].{name: displayName, email: mail}` | `$.value[?(@.jobTitle == 'Auditor')].displayName` | `.value \| map(select(.jobTitle == "Auditor")) \| .[].displayName` |
+
+Rules of thumb: reach for **JMESPath** to pull fields into a tidy shape,
+**JSONPath** when you need regex or to search deep in the tree, and **jq**
+when you need real transformation or aggregation. Note that **regex lives
+only in JSONPath** today — it works inside filter predicates (`[?(…)]`) via
+`@.field.match(/…/)` or `/…/.test(@.field)`, and runs under the extension's
+strict Content-Security-Policy because jsonpath-plus uses a safe,
+`eval`-free evaluator. The bundled jq (jqts) covers core jq but omits the
+regex builtins.
+
 ### Query examples (JMESPath)
 
 | Query | What it does |
@@ -206,8 +228,10 @@ Click the toolbar icon to open the settings popup:
 | `value[?jobTitle == 'Auditor'].mail \| [0]` | Filter, project, take first |
 | `"@odata.nextLink"` | Read a key containing special characters |
 
-See the [JMESPath tutorial](https://jmespath.org/tutorial.html) and the
-[JSONPath syntax reference](https://github.com/JSONPath-Plus/JSONPath#syntax-through-examples).
+See the [JMESPath tutorial](https://jmespath.org/tutorial.html), the
+[JSONPath syntax reference](https://github.com/JSONPath-Plus/JSONPath#syntax-through-examples),
+and the [jq manual](https://jqlang.github.io/jq/manual/) (note the bundled
+engine covers core jq, without the regex builtins).
 
 ## How it works
 
