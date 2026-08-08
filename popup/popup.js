@@ -36,8 +36,14 @@ try {
 // Enter also opens Graph Explorer: the button is focused when the popup opens.
 openExplorerLink.focus();
 
+var LANGUAGE_KEYS = ['jmespath', 'jsonpath', 'jq'];
+
+function validLanguage(value) {
+  return LANGUAGE_KEYS.indexOf(value) !== -1 ? value : 'jmespath';
+}
+
 function render(settings) {
-  languageSelect.value = settings.queryLanguage === 'jsonpath' ? 'jsonpath' : 'jmespath';
+  languageSelect.value = validLanguage(settings.queryLanguage);
   // advancedQuery and autoSignIn default to on; autoFetchNextLink to off.
   advancedQueryBox.checked = settings.advancedQuery !== false;
   autoSignInBox.checked = settings.autoSignIn !== false;
@@ -67,7 +73,7 @@ function save() {
   // would silently overwrite them.
   chrome.storage.local.get([STORAGE_KEY_SETTINGS], function (items) {
     var settings = items[STORAGE_KEY_SETTINGS] || {};
-    settings.queryLanguage = languageSelect.value === 'jsonpath' ? 'jsonpath' : 'jmespath';
+    settings.queryLanguage = validLanguage(languageSelect.value);
     settings.advancedQuery = advancedQueryBox.checked;
     settings.autoSignIn = autoSignInBox.checked;
     settings.autoFetchNextLink = autoFetchBox.checked;

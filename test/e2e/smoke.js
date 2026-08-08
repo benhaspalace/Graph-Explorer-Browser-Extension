@@ -399,6 +399,141 @@ function check(name, ok, extra) {
   const warningText = await page.locator('.gejq-warning').innerText();
   check('truncation warning shown to the user', /incomplete|stopped early/i.test(warningText), warningText.slice(0, 90));
 
+  // 10d. Switching languages auto-converts simple queries.
+  await query.fill('$.value[*].displayName');
+  await page.waitForTimeout(300);
+  await page.locator('.gejq-lang-select').selectOption('jmespath');
+  await page.waitForTimeout(400);
+  check('language switch converts the query', (await query.inputValue()) === 'value[].displayName', await query.inputValue());
+  check('converted query runs without error', (await page.locator('.gejq-panel .gejq-error').first().innerText()).trim() === '');
+  check('converted query returns data', (await page.locator('.gejq-result').innerText()).includes('Nestor Wilke'));
+
+  // 10e. Unconvertible queries keep their text, but suggestions follow
+  // the new language even while the query errors: `$..displayName` has
+  // no JMESPath equivalent and errors there as a syntax error.
+  await page.locator('.gejq-lang-select').selectOption('jsonpath');
+  await query.fill('$..displayName');
+  await page.waitForTimeout(300);
+  await page.locator('.gejq-lang-select').selectOption('jmespath');
+  await page.waitForTimeout(400);
+  check('unconvertible query left untouched', (await query.inputValue()) === '$..displayName');
+  check('error shown for incompatible query', (await page.locator('.gejq-panel .gejq-error').first().innerText()).trim() !== '');
+  const chipTexts = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-suggestions .gejq-chip')).map((c) => c.textContent);
+  });
+  check('suggestions refreshed to new language despite error', chipTexts.length > 0 && chipTexts.every((c) => !c.startsWith('$')), chipTexts.join(' | '));
+
+  // 10f. jq engine.
+  await page.locator('.gejq-lang-select').selectOption('jq');
+  await query.fill('.value | length');
+  await page.waitForTimeout(400);
+  check('jq count query works', (await page.locator('.gejq-result').innerText()).trim().includes('6'));
+  await query.fill('.value[].displayName');
+  await page.waitForTimeout(400);
+  check('jq iteration query works', (await page.locator('.gejq-result').innerText()).includes('Lidia Holloway'));
+
+  // 10g. CSV toggle switches the output view itself.
+  await page.locator('.gejq-seg-btn', { hasText: 'CSV' }).click();
+  await page.waitForTimeout(300);
+  const csvView = await page.locator('.gejq-result').innerText();
+  check('CSV view renders CSV text', csvView.startsWith('value') && csvView.includes('Adele Vance'), csvView.slice(0, 40));
+  check('meta marks CSV view', (await page.locator('.gejq-meta').innerText()).includes('CSV view'));
+  await page.locator('.gejq-seg-btn', { hasText: 'JSON' }).click();
+  await page.waitForTimeout(200);
+  check('JSON view restored', (await page.locator('.gejq-result').innerText()).trim().startsWith('['));
+
+  // 10h. Response info line: full selectable URL plus live indicator.
+  const info = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      badge: shadow.querySelector('.gejq-live-badge').textContent,
+      url: shadow.querySelector('.gejq-response-url').textContent
+    };
+  });
+  check('response info shows live badge', info.badge.includes('live'), info.badge);
+  check('response info shows full URL', info.url.includes('https://graph.microsoft.com/v1.0/users?paged=1'), info.url);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const select = shadow.querySelector('.gejq-history-select');
+    select.value = select.options[1].value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForTimeout(200);
+  check(
+    'pinned badge when an older response is selected',
+    await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-live-badge').textContent.includes('pinned'))
+  );
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const select = shadow.querySelector('.gejq-history-select');
+    select.value = select.options[0].value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForTimeout(200);
+
+  // 10i. Star and tag grouping in the query history.
+  await query.fill('.value[].displayName');
+  await query.press('Enter');
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    shadow.querySelector('.gejq-query-history .gejq-star').click();
+  });
+  await page.waitForTimeout(200);
+  await query.fill('.value | length');
+  await query.press('Enter');
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const rows = shadow.querySelectorAll('.gejq-query-history .gejq-example');
+    for (const row of rows) {
+      const star = row.querySelector('.gejq-star');
+      if (star && !star.classList.contains('gejq-starred')) {
+        row.querySelector('.gejq-icon-mini').click();
+        return;
+      }
+    }
+  });
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const input = shadow.querySelector('.gejq-tag-input');
+    input.value = 'counts';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  const headings = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-query-history .gejq-help-heading')).map((h) => h.textContent);
+  });
+  check('favorites group first', headings[0] === '★ Favorites', headings.join(' | '));
+  check('tag group present', headings.includes('counts'), headings.join(' | '));
+
+  // 10j. The split between response view and panel is draggable.
+  const hostWidthBefore = await page.evaluate(() => document.getElementById('gejq-host').getBoundingClientRect().width);
+  const resizerBox = await page.locator('.gejq-resizer').boundingBox();
+  check('resizer present in embedded mode', !!resizerBox);
+  if (resizerBox) {
+    await page.mouse.move(resizerBox.x + resizerBox.width / 2, resizerBox.y + 100);
+    await page.mouse.down();
+    await page.mouse.move(resizerBox.x - 150, resizerBox.y + 100, { steps: 5 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+    const hostWidthAfter = await page.evaluate(() => document.getElementById('gejq-host').getBoundingClientRect().width);
+    check('dragging the divider widens the panel', hostWidthAfter > hostWidthBefore + 100, `${Math.round(hostWidthBefore)} → ${Math.round(hostWidthAfter)}`);
+  }
+
+  // 10k. Query input starts as tall as the language selector.
+  const inputHeights = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      input: shadow.querySelector('.gejq-query-input').getBoundingClientRect().height,
+      select: shadow.querySelector('.gejq-lang-select').getBoundingClientRect().height
+    };
+  });
+  check('query input matches language selector height', Math.abs(inputHeights.input - inputHeights.select) <= 2, JSON.stringify(inputHeights));
+
   // 11. Re-opening the popup within the double-click window opens Graph Explorer.
   const tabsBefore = ctx.pages().length;
   const popupA = await ctx.newPage();

@@ -8,26 +8,6 @@ body {
   background: #ffffff;
 }
 
-@media (prefers-color-scheme: dark) {
-  body {
-    color: #ffffff;
-    background: #292929;
-  }
-  .button {
-    background: #479ef5;
-  }
-  code {
-    background: #1f1f1f;
-  }
-  footer,
-  .example {
-    color: #adadad;
-  }
-  footer a {
-    color: #479ef5;
-  }
-}
-
 header {
   display: flex;
   align-items: center;
@@ -127,15 +107,6 @@ code {
   align-items: center;
 }
 
-@media (prefers-color-scheme: dark) {
-  .settings {
-    border-top-color: #4d4d4d;
-  }
-  .settings h2 {
-    color: #adadad;
-  }
-}
-
 .button {
   display: block;
   padding: 8px;
@@ -157,4 +128,39 @@ footer {
 
 footer a {
   color: #0f6cbd;
+}
+
+/* Dark mode — must stay last in the file: these share specificity with
+   the base rules above, so source order decides which wins. */
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #ffffff;
+    background: #292929;
+  }
+  code {
+    background: #1f1f1f;
+    color: #d7e6f5;
+  }
+  .button {
+    background: #479ef5;
+  }
+  footer,
+  .example {
+    color: #adadad;
+  }
+  footer a {
+    color: #479ef5;
+  }
+  .settings {
+    border-top-color: #4d4d4d;
+  }
+  .settings h2 {
+    color: #adadad;
+  }
+  .settings select,
+  .settings input[type="number"] {
+    border-color: #4d4d4d;
+    background: #1f1f1f;
+    color: #ffffff;
+  }
 }

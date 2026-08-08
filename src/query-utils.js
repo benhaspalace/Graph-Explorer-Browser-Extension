@@ -232,16 +232,558 @@
     return out;
   }
 
+  function suggestJqQueries(json) {
+    var out = [];
+    if (Array.isArray(json)) {
+      out.push('.[]');
+      out.push('length');
+      return out;
+    }
+    if (json === null || typeof json !== 'object') {
+      return out;
+    }
+    if (Array.isArray(json.value)) {
+      var picked = pickItemKeys(json).picked;
+      for (var s = 0; s < picked.length; s++) {
+        out.push('.value[].' + jqKey(picked[s]));
+      }
+      if (picked.length >= 2) {
+        out.push('[.value[] | {' + jqKey(picked[0]) + ', ' + jqKey(picked[1]) + '}]');
+      }
+      if (picked.length >= 1) {
+        out.push('.value | map(select(.' + jqKey(picked[0]) + ' != null))');
+      }
+      out.push('.value | length');
+      if (typeof json['@odata.nextLink'] === 'string') {
+        out.push('."@odata.nextLink"');
+      }
+      return out;
+    }
+    var topKeys = Object.keys(json).filter(function (key) {
+      return key.indexOf('@') === -1;
+    });
+    for (var t = 0; t < topKeys.length && t < 3; t++) {
+      out.push('.' + jqKey(topKeys[t]));
+    }
+    out.push('keys');
+    return out;
+  }
+
   /**
    * Suggest queries based on the shape of a Graph response, in the given
-   * query language ('jmespath' by default, or 'jsonpath').
+   * query language ('jmespath' by default, 'jsonpath', or 'jq').
    * Returns an array of query strings, most useful first.
    */
   function suggestQueries(json, language) {
     if (language === 'jsonpath') {
       return suggestJsonPathQueries(json);
     }
+    if (language === 'jq') {
+      return suggestJqQueries(json);
+    }
     return suggestJmesPathQueries(json);
+  }
+
+  /** jq accessor for a key: `.key` or `."quoted key"`. */
+  function jqKey(key) {
+    if (PLAIN_IDENTIFIER.test(key)) {
+      return key;
+    }
+    return '"' + String(key).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+  }
+
+  // ----------------------------------------------------- query conversion
+
+  /**
+   * Best-effort conversion of simple path queries between JMESPath,
+   * JSONPath, and jq. Queries are parsed into a shared model of path
+   * segments (keys, wildcards, indexes, slices, one simple filter) plus
+   * an optional trailing count; anything beyond that subset (pipes,
+   * functions, reshaping, recursive descent, …) is not convertible and
+   * conversion reports ok: false so the caller can leave the query
+   * untouched.
+   */
+
+  var FILTER_OPS = ['==', '!=', '<=', '>=', '<', '>'];
+
+  function readQuoted(text, start, quote) {
+    // Returns { value, end } for a quoted string starting at `start`
+    // (which must be the opening quote), or null.
+    if (text[start] !== quote) {
+      return null;
+    }
+    var value = '';
+    for (var i = start + 1; i < text.length; i++) {
+      var ch = text[i];
+      if (ch === '\\' && i + 1 < text.length) {
+        value += text[i + 1];
+        i++;
+      } else if (ch === quote) {
+        return { value: value, end: i + 1 };
+      } else {
+        value += ch;
+      }
+    }
+    return null;
+  }
+
+  function parseFilterLiteral(text) {
+    // 'str', "str", `123`, or bare number → { kind, v } | null
+    var trimmed = text.trim();
+    if (trimmed === '') {
+      return null;
+    }
+    var quoted = readQuoted(trimmed, 0, "'") || readQuoted(trimmed, 0, '"') || readQuoted(trimmed, 0, '`');
+    if (quoted && quoted.end === trimmed.length) {
+      if (trimmed[0] === '`') {
+        var n = Number(quoted.value);
+        return isFinite(n) ? { kind: 'number', v: n } : null;
+      }
+      return { kind: 'string', v: quoted.value };
+    }
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      return { kind: 'number', v: Number(trimmed) };
+    }
+    return null;
+  }
+
+  function parseFilterBody(body) {
+    // `<field>` or `<field> <op> <literal>`; field is an identifier or
+    // quoted. Returns a filter segment or null.
+    var trimmed = body.trim();
+    var field = null;
+    var rest = '';
+    if (trimmed[0] === '"' || trimmed[0] === "'") {
+      var quoted = readQuoted(trimmed, 0, trimmed[0]);
+      if (!quoted) {
+        return null;
+      }
+      field = quoted.value;
+      rest = trimmed.slice(quoted.end);
+    } else {
+      var identMatch = /^[A-Za-z_][A-Za-z0-9_]*/.exec(trimmed);
+      if (!identMatch) {
+        return null;
+      }
+      field = identMatch[0];
+      rest = trimmed.slice(field.length);
+    }
+    rest = rest.trim();
+    if (rest === '') {
+      return { type: 'filter', field: field, op: null, value: null };
+    }
+    for (var i = 0; i < FILTER_OPS.length; i++) {
+      if (rest.indexOf(FILTER_OPS[i]) === 0) {
+        var literal = parseFilterLiteral(rest.slice(FILTER_OPS[i].length));
+        if (!literal) {
+          return null;
+        }
+        return { type: 'filter', field: field, op: FILTER_OPS[i], value: literal };
+      }
+    }
+    return null;
+  }
+
+  function parseBracketInner(inner, language) {
+    // Shared bracket contents: wildcard, index, slice, quoted key, filter.
+    var trimmed = inner.trim();
+    if (trimmed === '' || trimmed === '*') {
+      return { type: 'wildcard' };
+    }
+    if (/^-?\d+$/.test(trimmed)) {
+      return { type: 'index', value: parseInt(trimmed, 10) };
+    }
+    var slice = /^(-?\d*):(-?\d*)$/.exec(trimmed);
+    if (slice) {
+      return { type: 'slice', from: slice[1], to: slice[2] };
+    }
+    if (trimmed[0] === "'" || trimmed[0] === '"') {
+      var quoted = readQuoted(trimmed, 0, trimmed[0]);
+      if (quoted && quoted.end === trimmed.length) {
+        return { type: 'key', name: quoted.value };
+      }
+      return null;
+    }
+    if (trimmed[0] === '?') {
+      var body = trimmed.slice(1).trim();
+      if (language === 'jsonpath') {
+        var wrapped = /^\((.*)\)$/.exec(body);
+        if (!wrapped) {
+          return null;
+        }
+        body = wrapped[1].trim();
+        // Field references look like @.field or @['field'].
+        if (body.indexOf('@') !== 0) {
+          return null;
+        }
+        body = body.slice(1);
+        if (body[0] === '.') {
+          body = body.slice(1);
+        } else if (body[0] === '[') {
+          var close = body.indexOf(']');
+          if (close === -1) {
+            return null;
+          }
+          var keyPart = body.slice(1, close).trim();
+          var keyQuoted = readQuoted(keyPart, 0, keyPart[0]);
+          if (!keyQuoted || keyQuoted.end !== keyPart.length) {
+            return null;
+          }
+          body = '"' + keyQuoted.value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' + body.slice(close + 1);
+        } else {
+          return null;
+        }
+      }
+      return parseFilterBody(body);
+    }
+    return null;
+  }
+
+  /** Read a bracket group starting at `[`; returns { inner, end } | null. */
+  function readBracket(text, start) {
+    if (text[start] !== '[') {
+      return null;
+    }
+    var depth = 0;
+    var quote = null;
+    for (var i = start; i < text.length; i++) {
+      var ch = text[i];
+      if (quote) {
+        if (ch === '\\') {
+          i++;
+        } else if (ch === quote) {
+          quote = null;
+        }
+      } else if (ch === "'" || ch === '"' || ch === '`') {
+        quote = ch;
+      } else if (ch === '[') {
+        depth++;
+      } else if (ch === ']') {
+        depth--;
+        if (depth === 0) {
+          return { inner: text.slice(start + 1, i), end: i + 1 };
+        }
+      }
+    }
+    return null;
+  }
+
+  function parseJmesPathQuery(query) {
+    var text = query.trim();
+    var count = false;
+    var lengthMatch = /^length\((.*)\)$/.exec(text);
+    if (lengthMatch) {
+      count = true;
+      text = lengthMatch[1].trim();
+    }
+    var segments = [];
+    var i = 0;
+    while (i < text.length) {
+      var ch = text[i];
+      if (ch === '.') {
+        if (segments.length === 0) {
+          return null;
+        }
+        i++;
+        ch = text[i];
+        if (ch === undefined) {
+          return null;
+        }
+      }
+      if (ch === '"') {
+        var quoted = readQuoted(text, i, '"');
+        if (!quoted) {
+          return null;
+        }
+        segments.push({ type: 'key', name: quoted.value });
+        i = quoted.end;
+      } else if (/[A-Za-z_]/.test(ch)) {
+        var ident = /^[A-Za-z_][A-Za-z0-9_]*/.exec(text.slice(i))[0];
+        segments.push({ type: 'key', name: ident });
+        i += ident.length;
+      } else if (ch === '[') {
+        var bracket = readBracket(text, i);
+        if (!bracket) {
+          return null;
+        }
+        var segment = parseBracketInner(bracket.inner, 'jmespath');
+        if (!segment || segment.type === 'key') {
+          return null; // JMESPath uses ."quoted", not ['quoted']
+        }
+        segments.push(segment);
+        i = bracket.end;
+      } else {
+        return null;
+      }
+    }
+    if (segments.length === 0) {
+      return null;
+    }
+    return { count: count, segments: segments };
+  }
+
+  function parseJsonPathQuery(query) {
+    var text = query.trim();
+    if (text[0] !== '$') {
+      return null;
+    }
+    var segments = [];
+    var i = 1;
+    while (i < text.length) {
+      var ch = text[i];
+      if (ch === '.') {
+        if (text[i + 1] === '.') {
+          return null; // recursive descent has no equivalent
+        }
+        i++;
+        var ident = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(text.slice(i));
+        if (!ident) {
+          return null;
+        }
+        segments.push({ type: 'key', name: ident[0] });
+        i += ident[0].length;
+      } else if (ch === '[') {
+        var bracket = readBracket(text, i);
+        if (!bracket) {
+          return null;
+        }
+        var segment = parseBracketInner(bracket.inner, 'jsonpath');
+        if (!segment) {
+          return null;
+        }
+        segments.push(segment);
+        i = bracket.end;
+      } else {
+        return null;
+      }
+    }
+    // Trailing `.length` is jsonpath-plus's way of counting. (A genuine
+    // key named "length" in that position converts to a count instead —
+    // acceptable for a best-effort converter.)
+    var count = false;
+    var last = segments[segments.length - 1];
+    if (segments.length >= 2 && last && last.type === 'key' && last.name === 'length') {
+      segments.pop();
+      count = true;
+    }
+    if (segments.length === 0) {
+      return null;
+    }
+    return { count: count, segments: segments };
+  }
+
+  function parseJqQuery(query) {
+    var text = query.trim();
+    var count = false;
+    var pipeParts = text.split('|');
+    if (pipeParts.length === 2 && pipeParts[1].trim() === 'length') {
+      count = true;
+      text = pipeParts[0].trim();
+    } else if (pipeParts.length > 1) {
+      return null;
+    }
+    if (text[0] !== '.') {
+      return null;
+    }
+    var segments = [];
+    var i = 0;
+    while (i < text.length) {
+      var ch = text[i];
+      if (ch === '.') {
+        i++;
+        var next = text[i];
+        if (next === '"') {
+          var quoted = readQuoted(text, i, '"');
+          if (!quoted) {
+            return null;
+          }
+          segments.push({ type: 'key', name: quoted.value });
+          i = quoted.end;
+        } else if (next !== undefined && /[A-Za-z_]/.test(next)) {
+          var ident = /^[A-Za-z_][A-Za-z0-9_]*/.exec(text.slice(i))[0];
+          segments.push({ type: 'key', name: ident });
+          i += ident.length;
+        } else if (next === '[') {
+          continue; // `.[…]` — bracket handled below
+        } else {
+          return null;
+        }
+      } else if (ch === '[') {
+        var bracket = readBracket(text, i);
+        if (!bracket) {
+          return null;
+        }
+        var segment = parseBracketInner(bracket.inner, 'jq');
+        if (!segment || segment.type === 'key' || segment.type === 'filter') {
+          return null;
+        }
+        segments.push(segment);
+        i = bracket.end;
+      } else {
+        return null;
+      }
+    }
+    if (segments.length === 0) {
+      return null;
+    }
+    return { count: count, segments: segments };
+  }
+
+  function emitFilterLiteral(literal, quote) {
+    if (literal.kind === 'number') {
+      return String(literal.v);
+    }
+    var escaped = String(literal.v).replace(/\\/g, '\\\\').replace(new RegExp(quote, 'g'), '\\' + quote);
+    return quote + escaped + quote;
+  }
+
+  function emitJmesPathQuery(model) {
+    var out = '';
+    for (var i = 0; i < model.segments.length; i++) {
+      var segment = model.segments[i];
+      switch (segment.type) {
+        case 'key':
+          out += (out === '' ? '' : '.') + jmesKey(segment.name);
+          break;
+        case 'wildcard':
+          out += '[]';
+          break;
+        case 'index':
+          out += '[' + segment.value + ']';
+          break;
+        case 'slice':
+          out += '[' + segment.from + ':' + segment.to + ']';
+          break;
+        case 'filter':
+          out += '[?' + jmesKey(segment.field);
+          if (segment.op) {
+            out += ' ' + segment.op + ' ';
+            out += segment.value.kind === 'number' ? '`' + segment.value.v + '`' : emitFilterLiteral(segment.value, "'");
+          }
+          out += ']';
+          break;
+        default:
+          return null;
+      }
+    }
+    if (out === '') {
+      return null;
+    }
+    return model.count ? 'length(' + out + ')' : out;
+  }
+
+  function emitJsonPathQuery(model) {
+    var out = '$';
+    for (var i = 0; i < model.segments.length; i++) {
+      var segment = model.segments[i];
+      switch (segment.type) {
+        case 'key':
+          out += PLAIN_IDENTIFIER.test(segment.name)
+            ? '.' + segment.name
+            : "['" + segment.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "']";
+          break;
+        case 'wildcard':
+          out += '[*]';
+          break;
+        case 'index':
+          out += '[' + segment.value + ']';
+          break;
+        case 'slice':
+          out += '[' + segment.from + ':' + segment.to + ']';
+          break;
+        case 'filter':
+          var field = PLAIN_IDENTIFIER.test(segment.field)
+            ? '.' + segment.field
+            : "['" + segment.field.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "']";
+          out += '[?(@' + field;
+          if (segment.op) {
+            out += ' ' + segment.op + ' ' + emitFilterLiteral(segment.value, "'");
+          }
+          out += ')]';
+          break;
+        default:
+          return null;
+      }
+    }
+    return model.count ? out + '.length' : out;
+  }
+
+  function emitJqQuery(model) {
+    var out = '';
+    for (var i = 0; i < model.segments.length; i++) {
+      var segment = model.segments[i];
+      switch (segment.type) {
+        case 'key':
+          out += '.' + jqKey(segment.name);
+          break;
+        case 'wildcard':
+          out += (out === '' ? '.' : '') + '[]';
+          break;
+        case 'index':
+          out += (out === '' ? '.' : '') + '[' + segment.value + ']';
+          break;
+        case 'slice':
+          out += (out === '' ? '.' : '') + '[' + segment.from + ':' + segment.to + ']';
+          break;
+        case 'filter':
+          // Only expressible cleanly as a trailing map(select(…)).
+          if (i !== model.segments.length - 1) {
+            return null;
+          }
+          var condition = '.' + jqKey(segment.field);
+          condition += segment.op
+            ? ' ' + segment.op + ' ' + emitFilterLiteral(segment.value, '"')
+            : ' != null';
+          out = (out === '' ? '.' : out) + ' | map(select(' + condition + '))';
+          break;
+        default:
+          return null;
+      }
+    }
+    if (out === '') {
+      return null;
+    }
+    return model.count ? out + ' | length' : out;
+  }
+
+  var QUERY_PARSERS = {
+    jmespath: parseJmesPathQuery,
+    jsonpath: parseJsonPathQuery,
+    jq: parseJqQuery
+  };
+  var QUERY_EMITTERS = {
+    jmespath: emitJmesPathQuery,
+    jsonpath: emitJsonPathQuery,
+    jq: emitJqQuery
+  };
+
+  /**
+   * Convert a query between languages when it falls into the shared
+   * simple-path subset. Returns { ok: true, query } or { ok: false }.
+   */
+  function convertQuery(query, fromLanguage, toLanguage) {
+    if (fromLanguage === toLanguage) {
+      return { ok: true, query: query };
+    }
+    var parse = QUERY_PARSERS[fromLanguage];
+    var emit = QUERY_EMITTERS[toLanguage];
+    if (!parse || !emit) {
+      return { ok: false };
+    }
+    var model;
+    try {
+      model = parse(query);
+    } catch (e) {
+      model = null;
+    }
+    if (!model) {
+      return { ok: false };
+    }
+    var emitted = emit(model);
+    if (emitted === null) {
+      return { ok: false };
+    }
+    return { ok: true, query: emitted };
   }
 
   /**
@@ -295,10 +837,29 @@
   }
 
   /**
+   * Trim the query history to `limit` entries (0/null = unlimited),
+   * removing the oldest unstarred entries first. Starred (favorite)
+   * entries are never removed automatically.
+   */
+  function trimQueryHistoryList(list, limit) {
+    if (!limit || limit <= 0 || !Array.isArray(list) || list.length <= limit) {
+      return list;
+    }
+    var out = list.slice();
+    for (var i = out.length - 1; i >= 0 && out.length > limit; i--) {
+      if (!out[i].starred) {
+        out.splice(i, 1);
+      }
+    }
+    return out;
+  }
+
+  /**
    * Insert an executed query into the query history (newest first).
    * Entries are unique per (language, query): re-running a query moves it
-   * to the top, bumps `uses`, and refreshes `lastUsed`/`context`.
-   * `limit` caps the list length; 0 (or null) means unlimited.
+   * to the top, bumps `uses`, refreshes `lastUsed`/`context`, and keeps
+   * its star and tags. `limit` caps the list length (favorites exempt);
+   * 0 (or null) means unlimited.
    */
   function upsertQueryHistory(list, entry, limit) {
     var out = [];
@@ -315,12 +876,53 @@
       language: entry.language,
       lastUsed: entry.lastUsed,
       uses: ((existing && existing.uses) || 0) + 1,
-      context: entry.context || (existing && existing.context) || null
+      context: entry.context || (existing && existing.context) || null,
+      starred: !!(existing && existing.starred),
+      tags: (existing && existing.tags) || []
     });
-    if (limit && limit > 0 && out.length > limit) {
-      out = out.slice(0, limit);
+    return trimQueryHistoryList(out, limit);
+  }
+
+  /**
+   * Group the query history for display: favorites first, then one group
+   * per tag (alphabetical; an unstarred entry goes under its first tag),
+   * then the untagged rest under "Recent". Order inside each group stays
+   * newest-first. Returns [{ title, items }] with empty groups omitted.
+   */
+  function groupQueryHistory(list) {
+    var favorites = [];
+    var tagGroups = {};
+    var recent = [];
+    (Array.isArray(list) ? list : []).forEach(function (item) {
+      if (!item) {
+        return;
+      }
+      if (item.starred) {
+        favorites.push(item);
+        return;
+      }
+      var tag = Array.isArray(item.tags) && item.tags.length > 0 ? String(item.tags[0]) : null;
+      if (tag) {
+        (tagGroups[tag] = tagGroups[tag] || []).push(item);
+      } else {
+        recent.push(item);
+      }
+    });
+    var groups = [];
+    if (favorites.length > 0) {
+      groups.push({ title: '★ Favorites', items: favorites });
     }
-    return out;
+    Object.keys(tagGroups)
+      .sort(function (a, b) {
+        return a.localeCompare(b);
+      })
+      .forEach(function (tag) {
+        groups.push({ title: tag, items: tagGroups[tag] });
+      });
+    if (recent.length > 0) {
+      groups.push({ title: 'Recent', items: recent });
+    }
+    return groups;
   }
 
   /** "14:32:05" for today, "2026-08-06 14:32" for older timestamps. */
@@ -514,11 +1116,15 @@
   return {
     jmesKey: jmesKey,
     jsonPathKey: jsonPathKey,
+    jqKey: jqKey,
     clampInt: clampInt,
+    convertQuery: convertQuery,
     applyAdvancedQuery: applyAdvancedQuery,
     parseGraphRequest: parseGraphRequest,
     buildDeepLink: buildDeepLink,
     upsertQueryHistory: upsertQueryHistory,
+    trimQueryHistoryList: trimQueryHistoryList,
+    groupQueryHistory: groupQueryHistory,
     formatTimestamp: formatTimestamp,
     csvEligible: csvEligible,
     exportFilename: exportFilename,

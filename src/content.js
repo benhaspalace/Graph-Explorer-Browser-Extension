@@ -29,6 +29,7 @@
   var STORAGE_KEY_QUERY = 'gejq.lastQuery';
   var STORAGE_KEY_COLLAPSED = 'gejq.embedCollapsed';
   var STORAGE_KEY_FORMAT = 'gejq.exportFormat';
+  var STORAGE_KEY_SPLIT = 'gejq.splitPct';
   var STORAGE_KEY_SETTINGS = 'gejq.settings';
   var STORAGE_KEY_QUERY_HISTORY = 'gejq.queryHistory';
   var AUTO_SIGNIN_GUARD = 'gejq.autoSignInAttempted';
@@ -73,6 +74,20 @@
         { query: '$..displayName', label: 'Recursive descent' },
         { query: '$.value.length', label: 'Count items' }
       ]
+    },
+    jq: {
+      label: 'jq',
+      docsUrl: 'https://jqlang.org/manual/',
+      docsHost: 'jqlang.org',
+      blurb: 'Queries use jq syntax (via the pure-JS jqts engine — core jq features, not every builtin). Manual at ',
+      placeholder: 'jq query — e.g. .value[].displayName (empty = whole response)',
+      examples: [
+        { query: '.value[].displayName', label: 'Pluck one field from every item' },
+        { query: '.value | map(select(.jobTitle == "Auditor"))', label: 'Filter by value' },
+        { query: '[.value[] | {name: .displayName, email: .mail}]', label: 'Reshape objects' },
+        { query: '.value | sort_by(.displayName) | .[].displayName', label: 'Sort' },
+        { query: '.value | length', label: 'Count items' }
+      ]
     }
   };
 
@@ -85,6 +100,7 @@
     open: false, // panel visible (embedded: expanded; floating: drawer open)
     collapsedPref: false, // user preference: keep the embedded panel hidden
     format: 'json', // export format: 'json' | 'csv'
+    splitPct: 50, // width of the embedded panel as % of the results area
     settings: normalizeSettings(null), // fresh mutable copy of the defaults
     queryHistory: [] // executed queries, newest first (persisted)
   };
@@ -183,16 +199,31 @@
     container.appendChild(fragment);
   }
 
+  /**
+   * Render the query result in the result area. In CSV export mode the
+   * output view shows the CSV text itself (when the result is CSV-able);
+   * otherwise pretty-printed JSON. Returns 'csv' or 'json' accordingly.
+   */
   function renderResult(value) {
     var output = ui.resultOutput;
     clearChildren(output);
     if (value === undefined) {
       output.appendChild(el('div', 'gejq-empty', 'The query returned no result (undefined).'));
-      return;
+      return 'json';
     }
-    var text = JSON.stringify(value, null, 2);
-    if (typeof text !== 'string') {
-      text = String(value);
+    var mode = 'json';
+    var text = null;
+    if (state.format === 'csv') {
+      text = GEJQ.toCsv(value);
+      if (text !== null) {
+        mode = 'csv';
+      }
+    }
+    if (mode === 'json') {
+      text = JSON.stringify(value, null, 2);
+      if (typeof text !== 'string') {
+        text = String(value);
+      }
     }
     if (text.length > RENDER_LIMIT) {
       output.appendChild(
@@ -203,15 +234,16 @@
         )
       );
       output.appendChild(el('pre', 'gejq-json', text.slice(0, RENDER_LIMIT) + '\n…'));
-      return;
+      return mode;
     }
     var pre = el('pre', 'gejq-json');
-    if (text.length > HIGHLIGHT_LIMIT) {
+    if (mode === 'csv' || text.length > HIGHLIGHT_LIMIT) {
       pre.textContent = text;
     } else {
       appendHighlightedJson(pre, text);
     }
     output.appendChild(pre);
+    return mode;
   }
 
   // ------------------------------------------------------------ query logic
@@ -236,6 +268,12 @@
     if (state.settings.queryLanguage === 'jsonpath') {
       return JSONPath.JSONPath({ path: query, json: json, wrap: true });
     }
+    if (state.settings.queryLanguage === 'jq') {
+      var jq = JQTS.default || JQTS;
+      var outputs = jq.compile(query).evaluate(json);
+      // jq produces a stream of outputs; unwrap the common single-output case.
+      return outputs.length === 1 ? outputs[0] : outputs;
+    }
     return jmespath.search(json, query);
   }
 
@@ -255,8 +293,31 @@
     }
   }
 
+  /**
+   * Show the full request line of the selected response — selectable
+   * text, unlike the truncated labels inside the <select> — plus a badge
+   * saying whether the query follows the live (latest) response or is
+   * pinned to an older one.
+   */
+  function updateResponseInfo(response) {
+    clearChildren(ui.responseInfo);
+    if (!response) {
+      return;
+    }
+    var live = state.followLatest;
+    var badge = el('span', 'gejq-live-badge' + (live ? ' gejq-live' : ''), live ? '● live' : 'pinned');
+    badge.title = live
+      ? 'Following the latest response: the query re-runs automatically whenever a new Graph query executes'
+      : 'Pinned to this response — pick the newest entry in the list above to follow new responses again';
+    ui.responseInfo.appendChild(badge);
+    ui.responseInfo.appendChild(
+      el('span', 'gejq-response-url', response.method + ' ' + response.url + (response.manual ? '' : ' → ' + response.status))
+    );
+  }
+
   function runQuery() {
     var response = selectedResponse();
+    updateResponseInfo(response);
 
     if (!response) {
       ui.error.textContent = '';
@@ -296,6 +357,11 @@
       ? '⚠ Auto-fetch stopped early: only ' + response.pages + ' pages (' + GEJQ.formatBytes(response.size) + ') were fetched before hitting the configured limit — this dataset is incomplete. Raise the auto-fetch limits in the extension settings to fetch more.'
       : '';
 
+    // Suggestions depend on the response and language, not on the query —
+    // refresh them even when the current query errors (e.g. right after
+    // a language switch left an incompatible query in the box).
+    renderSuggestions(response.json);
+
     var outcome = currentResult();
     if (outcome.error) {
       ui.error.textContent = outcome.error;
@@ -303,10 +369,9 @@
       return; // keep previous result visible while the user types
     }
     ui.error.textContent = '';
-    renderResult(outcome.value);
-    ui.meta.textContent = GEJQ.describeResult(outcome.value);
+    var viewMode = renderResult(outcome.value);
+    ui.meta.textContent = GEJQ.describeResult(outcome.value) + (viewMode === 'csv' ? ' · CSV view' : '');
     updateExportButtons(outcome);
-    renderSuggestions(response.json);
   }
 
   function scheduleRun() {
@@ -367,7 +432,7 @@
   function setFormat(format) {
     state.format = format;
     storageSet(STORAGE_KEY_FORMAT, format);
-    updateExportButtons();
+    runQuery(); // re-render: the output view follows the selected format
   }
 
   // -------------------------------------------------------------- settings
@@ -421,6 +486,38 @@
     }
     rebuildHelp();
     runQuery();
+  }
+
+  /**
+   * Best-effort translation of the current query into the new language
+   * (simple path expressions only). When the query can't be converted it
+   * is left as-is: the error line and refreshed suggestions guide the
+   * user instead.
+   */
+  function convertCurrentQuery(fromLanguage, toLanguage) {
+    var query = state.query.trim();
+    if (query === '') {
+      return;
+    }
+    var converted = GEJQ.convertQuery(query, fromLanguage, toLanguage);
+    if (converted.ok && converted.query !== query) {
+      state.query = converted.query;
+      ui.queryInput.value = converted.query;
+      storageSet(STORAGE_KEY_QUERY, converted.query);
+    }
+  }
+
+  /** Switch language (from the panel selector), converting the query. */
+  function switchLanguage(newLanguage) {
+    var oldLanguage = state.settings.queryLanguage;
+    if (!LANGUAGES[newLanguage] || newLanguage === oldLanguage) {
+      return;
+    }
+    state.settings.queryLanguage = newLanguage;
+    saveSettings();
+    pushSettingsToPage();
+    convertCurrentQuery(oldLanguage, newLanguage);
+    applyLanguage();
   }
 
   // ----------------------------------------------------------- auto sign-in
@@ -667,45 +764,117 @@
     renderQueryHistory();
   }
 
+  function persistQueryHistory() {
+    storageSet(STORAGE_KEY_QUERY_HISTORY, state.queryHistory);
+    renderQueryHistory();
+  }
+
+  /** Swap the row's meta label for an inline comma-separated tag editor. */
+  function editTags(item, row, metaLabel) {
+    var input = el('input', 'gejq-tag-input');
+    input.type = 'text';
+    input.value = (item.tags || []).join(', ');
+    input.placeholder = 'tags, comma separated';
+    function commit() {
+      var tags = [];
+      input.value.split(',').forEach(function (tag) {
+        var trimmed = tag.trim();
+        if (trimmed !== '' && tags.indexOf(trimmed) === -1) {
+          tags.push(trimmed);
+        }
+      });
+      item.tags = tags;
+      persistQueryHistory();
+    }
+    input.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commit();
+      } else if (event.key === 'Escape') {
+        event.stopPropagation();
+        renderQueryHistory(); // cancel
+      }
+    });
+    input.addEventListener('blur', commit);
+    row.replaceChild(input, metaLabel);
+    input.focus();
+  }
+
+  function queryHistoryRow(item) {
+    var row = el('div', 'gejq-example');
+
+    var star = button(
+      'gejq-star' + (item.starred ? ' gejq-starred' : ''),
+      item.starred ? '★' : '☆',
+      item.starred ? 'Remove from favorites' : 'Pin to favorites',
+      function () {
+        item.starred = !item.starred;
+        persistQueryHistory();
+      }
+    );
+    row.appendChild(star);
+
+    row.appendChild(
+      button('gejq-chip', item.query, 'Use this query', function () {
+        if (LANGUAGES[item.language] && state.settings.queryLanguage !== item.language) {
+          // Saved queries are already in their own language — switch
+          // without attempting a conversion.
+          state.settings.queryLanguage = item.language;
+          saveSettings();
+          pushSettingsToPage();
+          applyLanguage();
+        }
+        setQuery(item.query);
+      })
+    );
+
+    var metaText =
+      GEJQ.formatTimestamp(item.lastUsed) +
+      ' · ' +
+      (LANGUAGES[item.language] ? LANGUAGES[item.language].label : item.language);
+    if (item.context && item.context.url) {
+      metaText += ' · ' + item.context.method + ' ' + GEJQ.summarizeUrl(item.context.url, 32);
+    }
+    if (Array.isArray(item.tags) && item.tags.length > 0) {
+      metaText += ' · #' + item.tags.join(' #');
+    }
+    var metaLabel = el('span', 'gejq-example-label', metaText);
+    row.appendChild(metaLabel);
+
+    row.appendChild(
+      button('gejq-icon-mini', '🏷', 'Edit tags (comma separated)', function () {
+        editTags(item, row, metaLabel);
+      })
+    );
+
+    if (item.context && item.context.url && GEJQ.parseGraphRequest(item.context.url)) {
+      row.appendChild(
+        button('gejq-chip gejq-load', 'Load ↗', 'Re-populate Graph Explorer with this request (method + URL)', function () {
+          populateGraphExplorer(item.context.method, item.context.url);
+        })
+      );
+    }
+    return row;
+  }
+
   function renderQueryHistory() {
     var container = ui.queryHistoryList;
     clearChildren(container);
     ui.queryHistorySummary.textContent = 'Query history' + (state.queryHistory.length ? ' (' + state.queryHistory.length + ')' : '');
     if (state.queryHistory.length === 0) {
       container.appendChild(
-        el('p', 'gejq-help-text', 'Queries you run (Enter, or clicking a suggestion) are saved here with a timestamp and the Graph request they ran against.')
+        el('p', 'gejq-help-text', 'Queries you run (Enter, or clicking a suggestion) are saved here with a timestamp and the Graph request they ran against. Star ★ a query to pin it; tag 🏷 queries to group them.')
       );
       return;
     }
-    state.queryHistory.forEach(function (item) {
-      var row = el('div', 'gejq-example');
-      row.appendChild(
-        button('gejq-chip', item.query, 'Use this query', function () {
-          if (LANGUAGES[item.language] && state.settings.queryLanguage !== item.language) {
-            state.settings.queryLanguage = item.language;
-            saveSettings();
-            pushSettingsToPage();
-            applyLanguage();
-          }
-          setQuery(item.query);
-        })
-      );
-      var metaText =
-        GEJQ.formatTimestamp(item.lastUsed) +
-        ' · ' +
-        (LANGUAGES[item.language] ? LANGUAGES[item.language].label : item.language);
-      if (item.context && item.context.url) {
-        metaText += ' · ' + item.context.method + ' ' + GEJQ.summarizeUrl(item.context.url, 32);
+    var groups = GEJQ.groupQueryHistory(state.queryHistory);
+    groups.forEach(function (group) {
+      if (groups.length > 1 || group.title !== 'Recent') {
+        container.appendChild(el('div', 'gejq-help-heading', group.title));
       }
-      row.appendChild(el('span', 'gejq-example-label', metaText));
-      if (item.context && item.context.url && GEJQ.parseGraphRequest(item.context.url)) {
-        row.appendChild(
-          button('gejq-chip gejq-load', 'Load ↗', 'Re-populate Graph Explorer with this request (method + URL)', function () {
-            populateGraphExplorer(item.context.method, item.context.url);
-          })
-        );
-      }
-      container.appendChild(row);
+      group.items.forEach(function (item) {
+        container.appendChild(queryHistoryRow(item));
+      });
     });
   }
 
@@ -875,7 +1044,7 @@
       }
       // The host stays attached even when collapsed (its width shrinks to
       // zero) so the fixed-position FAB inside it can bring the panel back.
-      ui.host.style.flex = state.open ? '1 1 50%' : '0 0 auto';
+      ui.host.style.flex = state.open ? '0 0 ' + state.splitPct + '%' : '0 0 auto';
       ui.host.style.minWidth = '0';
       ui.panel.style.display = state.open ? '' : 'none';
       ui.panel.classList.add('gejq-open');
@@ -976,6 +1145,38 @@
     header.appendChild(headerButtons);
     panel.appendChild(header);
 
+    // Drag handle on the panel's left edge: adjusts the split between
+    // Graph Explorer's response view and the query tool (embedded mode).
+    var resizer = el('div', 'gejq-resizer');
+    resizer.title = 'Drag to resize';
+    resizer.addEventListener('mousedown', function (event) {
+      if (!state.embedded) {
+        return;
+      }
+      event.preventDefault();
+      var anchor = embedAnchor();
+      if (!anchor) {
+        return;
+      }
+      var rect = anchor.getBoundingClientRect();
+      var previousUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = 'none';
+      function onMove(moveEvent) {
+        var pct = ((rect.right - moveEvent.clientX) / rect.width) * 100;
+        state.splitPct = Math.min(85, Math.max(15, Math.round(pct)));
+        applyVisibility();
+      }
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.style.userSelect = previousUserSelect;
+        storageSet(STORAGE_KEY_SPLIT, state.splitPct);
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+    panel.appendChild(resizer);
+
     var historyRow = el('div', 'gejq-history-row');
     var historySelect = el('select', 'gejq-history-select');
     historySelect.title = 'Captured Graph responses (newest first)';
@@ -987,6 +1188,11 @@
     historyRow.appendChild(historySelect);
     panel.appendChild(historyRow);
 
+    // Full request line of the selected response: selectable, with a
+    // live/pinned indicator.
+    var responseInfo = el('div', 'gejq-response-info');
+    panel.appendChild(responseInfo);
+
     // Top half of the split: the query input with the language selector.
     var queryRow = el('div', 'gejq-query-row');
     var languageSelect = el('select', 'gejq-lang-select');
@@ -997,10 +1203,7 @@
       languageSelect.appendChild(option);
     });
     languageSelect.addEventListener('change', function () {
-      state.settings.queryLanguage = LANGUAGES[languageSelect.value] ? languageSelect.value : 'jmespath';
-      saveSettings();
-      pushSettingsToPage();
-      applyLanguage();
+      switchLanguage(languageSelect.value);
     });
     queryRow.appendChild(languageSelect);
     var queryInput = el('textarea', 'gejq-query-input');
@@ -1140,6 +1343,7 @@
       panel: panel,
       titleLabel: titleLabel,
       historySelect: historySelect,
+      responseInfo: responseInfo,
       queryInput: queryInput,
       error: error,
       warning: warning,
@@ -1220,10 +1424,11 @@
       })
       .then(function (css) {
         storageGet(
-          [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FORMAT, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
+          [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FORMAT, STORAGE_KEY_SPLIT, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
           function (items) {
             state.collapsedPref = items[STORAGE_KEY_COLLAPSED] === true;
             state.format = items[STORAGE_KEY_FORMAT] === 'csv' ? 'csv' : 'json';
+            state.splitPct = GEJQ.clampInt(items[STORAGE_KEY_SPLIT], 15, 85, 50);
             state.settings = normalizeSettings(items[STORAGE_KEY_SETTINGS]);
             state.queryHistory = Array.isArray(items[STORAGE_KEY_QUERY_HISTORY])
               ? items[STORAGE_KEY_QUERY_HISTORY]
@@ -1248,16 +1453,18 @@
         var previousLanguage = state.settings.queryLanguage;
         state.settings = normalizeSettings(changes[STORAGE_KEY_SETTINGS].newValue);
         pushSettingsToPage();
-        // A lowered history limit trims the stored history right away.
+        // A lowered history limit trims the stored history right away
+        // (favorites are exempt).
         var limit = state.settings.historyLimit;
         if (limit > 0 && state.queryHistory.length > limit) {
-          state.queryHistory = GEJQ.trimHistory(state.queryHistory, limit);
+          state.queryHistory = GEJQ.trimQueryHistoryList(state.queryHistory, limit);
           storageSet(STORAGE_KEY_QUERY_HISTORY, state.queryHistory);
           if (ui) {
             renderQueryHistory();
           }
         }
         if (ui && state.settings.queryLanguage !== previousLanguage) {
+          convertCurrentQuery(previousLanguage, state.settings.queryLanguage);
           applyLanguage();
         }
       });

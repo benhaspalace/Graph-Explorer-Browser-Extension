@@ -10,13 +10,23 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
 
 ## Features
 
-- **Split results view** — the Graph Explorer results area splits in half:
+- **Split results view** — the Graph Explorer results area splits:
   the original response stays on the left, and the query tool takes the right,
-  with the query input on top and the live result underneath.
-- **Two query languages** — JMESPath (default) or JSONPath, switchable from
-  the selector next to the query box or from the extension settings.
+  with the query input on top and the live result underneath. Drag the divider
+  to resize the split; the position is remembered.
+- **Three query languages** — JMESPath (default), JSONPath, or jq, switchable
+  from the selector next to the query box or from the extension settings.
   - JMESPath: `value[?jobTitle == 'Auditor'].{name: displayName, email: mail}`
   - JSONPath: `$.value[?(@.jobTitle == 'Auditor')].displayName`
+  - jq: `.value | map(select(.jobTitle == "Auditor")) | .[].displayName`
+  Switching languages auto-converts simple path queries (keys, wildcards,
+  indexes, slices, simple filters, counts) between the languages; queries
+  outside that subset are left untouched with the error line and refreshed
+  suggestions to guide you.
+- **Live indicator** — the panel shows the full (selectable) request line of
+  the response being queried, with a ● live badge while it follows the latest
+  response (re-running your query automatically on every new Graph query) or
+  a "pinned" badge when you've selected an older response.
 - **Advanced Graph queries by default** — GET requests that use `$filter`,
   `$search`, or `$orderby` automatically gain the `ConsistencyLevel: eventual`
   header and `$count=true`, which [Microsoft Graph advanced queries](https://learn.microsoft.com/graph/aad-advanced-queries)
@@ -40,11 +50,15 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   and URL: in place when the method already matches, otherwise via Graph
   Explorer's own share-link format (`?request=…&method=…&version=…`), the same
   mechanism its built-in history uses.
+- **Favorites and tags** — star ★ a saved query to pin it (favorites are
+  grouped on top and never trimmed by the history limit), and tag 🏷 queries
+  with your own labels to group them below the favorites.
 - **Smart suggestions** — one-click query chips generated from the shape of
   the current response in the selected language, plus a built-in cheat sheet.
-- **Export as JSON or CSV** — a format switch in the footer controls both
-  **Copy** and **Download** (CSV is available for arrays of objects or
-  scalars — great for Excel).
+- **Export as JSON or CSV** — a format switch in the footer controls the
+  output view as well as **Copy** and **Download** (CSV is available for
+  arrays of objects or scalars — great for Excel; downloads include a UTF-8
+  BOM so Excel reads accents correctly).
 - **Paste JSON** — paste any JSON document to query it, even without running a
   Graph request.
 - **Quick access** — double-click the toolbar icon to jump straight to Graph
@@ -92,7 +106,7 @@ Click the toolbar icon to open the settings popup:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| Query language | JMESPath | Language used by the query panel (also switchable in the panel) |
+| Query language | JMESPath | JMESPath, JSONPath, or jq (also switchable in the panel) |
 | Advanced queries | on | Adds `ConsistencyLevel: eventual` + `$count=true` to `$filter`/`$search`/`$orderby` GET requests |
 | Auto sign-in | on | Starts the sign-in flow when you open Graph Explorer signed out |
 | Auto-fetch all pages | off | Follows `@odata.nextLink` and adds the combined dataset to the response list |
@@ -126,9 +140,10 @@ See the [JMESPath tutorial](https://jmespath.org/tutorial.html) and the
   `MutationObserver` re-attaches the panel whenever Graph Explorer's React app
   re-renders that area.
 - `vendor/jmespath.js` ([jmespath.js](https://github.com/jmespath/jmespath.js)
-  0.16.0, MIT) and `vendor/jsonpath-plus.js`
-  ([jsonpath-plus](https://github.com/JSONPath-Plus/JSONPath) 10.3.0, MIT)
-  evaluate the queries.
+  0.16.0, MIT), `vendor/jsonpath-plus.js`
+  ([jsonpath-plus](https://github.com/JSONPath-Plus/JSONPath) 10.3.0, MIT),
+  and `vendor/jqts.js` ([jqts](https://github.com/kentdotn/jqts) 0.0.8, MIT —
+  a pure-JS jq clone covering core jq; no WASM needed) evaluate the queries.
 
 ### Privacy
 
@@ -185,9 +200,9 @@ test/                  Unit tests (`node --test`)
 
 ## Future ideas
 
-- A `jq` engine (needs a WASM build, which is why it isn't bundled yet) — the
-  language selector is already in place to accommodate it.
-- Saved favorite queries with names.
+- Full jq builtin coverage via a WASM build of real jq (the bundled jqts
+  engine covers core jq features).
+- Named saved queries shared across devices via `chrome.storage.sync`.
 
 ## License
 
