@@ -741,6 +741,33 @@ test('toCsv JSON-encodes nested values into cells', () => {
   assert.equal(csv, 'name,tags\r\nA,"[""x"",""y""]"');
 });
 
+test('toCsv/toTsv neutralize spreadsheet formula injection (CWE-1236)', () => {
+  // Textual cells starting with a formula trigger get a guarding apostrophe
+  // so Excel/Sheets/LibreOffice do not evaluate attacker-controlled Graph
+  // field values (displayName, mail subject, file name, …) as formulas.
+  assert.equal(GEJQ.toCsv([{ n: '=IMPORTXML("//evil","x")' }]), 'n\r\n"\'=IMPORTXML(""//evil"",""x"")"');
+  assert.equal(GEJQ.toCsv([{ n: '=1+1' }]), "n\r\n'=1+1");
+  assert.equal(GEJQ.toCsv([{ n: '+1' }]), "n\r\n'+1");
+  assert.equal(GEJQ.toCsv([{ n: '-1' }]), "n\r\n'-1");
+  assert.equal(GEJQ.toCsv([{ n: '@foo' }]), "n\r\n'@foo");
+  // Guard applies before quoting when the value also needs quoting.
+  assert.equal(GEJQ.toCsv([{ n: '=cmd,evil' }]), 'n\r\n"\'=cmd,evil"');
+  // Contains a quote, so it is also RFC-quoted (guard applied first).
+  assert.equal(GEJQ.toTsv([{ n: '=WEBSERVICE("//x")' }]), 'n\r\n"\'=WEBSERVICE(""//x"")"');
+  assert.equal(GEJQ.toTsv([{ n: '=SUM(A1:A2)' }]), "n\r\n'=SUM(A1:A2)");
+  // A leading tab (which some parsers strip to reach a formula) is guarded;
+  // a tab needs no CSV quoting, but does need TSV quoting (it is the delimiter).
+  assert.equal(GEJQ.toCsv([{ n: '\t=1' }]), "n\r\n'\t=1");
+  assert.equal(GEJQ.toTsv([{ n: '\t=1' }]), 'n\r\n"\'\t=1"');
+  // Scalar arrays get the same treatment.
+  assert.equal(GEJQ.toCsv(['=danger', 'safe']), "value\r\n'=danger\r\nsafe");
+  // Ordinary text is untouched, and real numbers (incl. negatives) stay
+  // numeric — only string values that look like formulas are guarded.
+  assert.equal(GEJQ.toCsv([{ n: 'Adele' }]), 'n\r\nAdele');
+  assert.equal(GEJQ.toCsv([{ n: 5 }, { n: -3 }]), 'n\r\n5\r\n-3');
+  assert.equal(GEJQ.toCsv([{ n: '-3' }]), "n\r\n'-3");
+});
+
 test('vendored jmespath supports the documented example queries', () => {
   assert.deepEqual(
     jmespath.search(SAMPLE_USERS_RESPONSE, 'value[].displayName'),

@@ -96,7 +96,9 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   and **Copy**/**Download** export the CSV *with the applied sorting*; a
   **TSV** button copies a tab-separated grid that pastes straight into
   Excel. CSV downloads include a UTF-8 BOM so Excel reads accents
-  correctly. **Tree** shows a collapsible tree of the current result —
+  correctly, and cell values that begin with `=`, `+`, `-`, or `@` are
+  prefixed with an apostrophe so a crafted Graph field (e.g. a display name)
+  can't run as a spreadsheet formula. **Tree** shows a collapsible tree of the current result —
   click any property to use its path as the query (with a query already in
   the box, the click composes: `.value` + a click on `displayName` →
   `.value | .[].displayName`).

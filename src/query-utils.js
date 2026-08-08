@@ -1781,6 +1781,16 @@
       } else {
         text = String(cell);
       }
+      // Neutralize spreadsheet formula injection (CWE-1236): Graph field
+      // values are attacker-controllable (a displayName, mail subject, file
+      // name, …). A textual cell starting with =, +, -, @ (or a control
+      // char some parsers strip to reach one) is evaluated as a formula by
+      // Excel / Sheets / LibreOffice on open — so prefix a guarding
+      // apostrophe. Quoting alone is not a fix: Excel still parses "=…" as
+      // a formula. Real numbers are exempt so negatives stay numeric.
+      if (typeof cell !== 'number' && /^[=+\-@\t\r]/.test(text)) {
+        text = "'" + text;
+      }
       if (text.indexOf(delimiter) !== -1 || /["\n\r]/.test(text)) {
         text = '"' + text.replace(/"/g, '""') + '"';
       }
