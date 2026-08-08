@@ -32,7 +32,7 @@
   var STORAGE_KEY_SETTINGS = 'gejq.settings';
   var STORAGE_KEY_QUERY_HISTORY = 'gejq.queryHistory';
   var AUTO_SIGNIN_GUARD = 'gejq.autoSignInAttempted';
-  var DEFAULT_SETTINGS = {
+  var DEFAULT_SETTINGS = Object.freeze({
     advancedQuery: true,
     autoSignIn: true,
     autoFetchNextLink: false,
@@ -40,7 +40,7 @@
     autoFetchMaxMb: 10,
     queryLanguage: 'jmespath',
     historyLimit: 50 // 0 = unlimited
-  };
+  });
   // The signed-out "profile view" button in Graph Explorer's top bar —
   // clicking it starts the sign-in flow.
   var SIGN_IN_SELECTORS = ['button[aria-label="Sign in" i]', 'button[aria-label="sign in to graph explorer" i]'];
@@ -85,7 +85,7 @@
     open: false, // panel visible (embedded: expanded; floating: drawer open)
     collapsedPref: false, // user preference: keep the embedded panel hidden
     format: 'json', // export format: 'json' | 'csv'
-    settings: DEFAULT_SETTINGS,
+    settings: normalizeSettings(null), // fresh mutable copy of the defaults
     queryHistory: [] // executed queries, newest first (persisted)
   };
 
@@ -267,7 +267,9 @@
         el(
           'div',
           'gejq-empty',
-          'Run a query in Graph Explorer — the response will appear here, ready for JMESPath querying. Or use “Paste JSON” to bring your own data.'
+          'Run a query in Graph Explorer — the response will appear here, ready for ' +
+            LANGUAGES[state.settings.queryLanguage].label +
+            ' querying. Or use “Paste JSON” to bring your own data.'
         )
       );
       updateExportButtons();
@@ -297,13 +299,13 @@
     var outcome = currentResult();
     if (outcome.error) {
       ui.error.textContent = outcome.error;
-      updateExportButtons();
+      updateExportButtons(outcome);
       return; // keep previous result visible while the user types
     }
     ui.error.textContent = '';
     renderResult(outcome.value);
     ui.meta.textContent = GEJQ.describeResult(outcome.value);
-    updateExportButtons();
+    updateExportButtons(outcome);
     renderSuggestions(response.json);
   }
 
@@ -322,34 +324,42 @@
     if (outcome.error || outcome.value === undefined) {
       return null;
     }
+    var response = selectedResponse();
+    var sourceUrl = response ? response.url : '';
     if (state.format === 'csv') {
       var csv = GEJQ.toCsv(outcome.value);
       if (csv === null) {
         return null;
       }
-      return { text: csv, filename: 'graph-query-result.csv', mime: 'text/csv' };
+      return { text: csv, filename: GEJQ.exportFilename(sourceUrl, 'csv'), mime: 'text/csv' };
     }
     return {
       text: JSON.stringify(outcome.value, null, 2),
-      filename: 'graph-query-result.json',
+      filename: GEJQ.exportFilename(sourceUrl, 'json'),
       mime: 'application/json'
     };
   }
 
-  function updateExportButtons() {
-    var outcome = currentResult();
+  /**
+   * Refresh the export controls. Pass the outcome already computed by
+   * the caller to avoid re-evaluating the query; omitted only from
+   * callers that run outside a query evaluation (init, format switch).
+   */
+  function updateExportButtons(outcome) {
+    if (outcome === undefined) {
+      outcome = currentResult();
+    }
     var hasResult = !outcome.error && outcome.value !== undefined;
-    var csv = hasResult ? GEJQ.toCsv(outcome.value) : null;
-    ui.csvToggle.disabled = !hasResult || csv === null;
-    ui.csvToggle.title =
-      hasResult && csv === null
-        ? 'This result cannot be represented as CSV (needs an array of objects or scalar values)'
-        : 'Export as CSV';
+    var csvOk = hasResult && GEJQ.csvEligible(outcome.value);
+    ui.csvToggle.disabled = !csvOk;
+    ui.csvToggle.title = hasResult && !csvOk
+      ? 'This result cannot be represented as CSV (needs an array of objects or scalar values)'
+      : 'Export as CSV';
     ui.jsonToggle.classList.toggle('gejq-seg-active', state.format === 'json');
     ui.csvToggle.classList.toggle('gejq-seg-active', state.format === 'csv');
     ui.jsonToggle.setAttribute('aria-pressed', state.format === 'json' ? 'true' : 'false');
     ui.csvToggle.setAttribute('aria-pressed', state.format === 'csv' ? 'true' : 'false');
-    var exportable = hasResult && (state.format === 'json' || csv !== null);
+    var exportable = hasResult && (state.format === 'json' || csvOk);
     ui.copyButton.disabled = !exportable;
     ui.downloadButton.disabled = !exportable;
   }
@@ -362,13 +372,6 @@
 
   // -------------------------------------------------------------- settings
 
-  function clampInt(value, min, max, fallback) {
-    if (typeof value === 'number' && isFinite(value) && value >= min) {
-      return Math.min(Math.floor(value), max);
-    }
-    return fallback;
-  }
-
   function normalizeSettings(raw) {
     var historyLimit = raw && typeof raw.historyLimit === 'number' && raw.historyLimit >= 0
       ? Math.floor(raw.historyLimit)
@@ -377,8 +380,8 @@
       advancedQuery: !raw || raw.advancedQuery !== false,
       autoSignIn: !raw || raw.autoSignIn !== false,
       autoFetchNextLink: !!raw && raw.autoFetchNextLink === true,
-      autoFetchMaxPages: clampInt(raw && raw.autoFetchMaxPages, 1, 1000, DEFAULT_SETTINGS.autoFetchMaxPages),
-      autoFetchMaxMb: clampInt(raw && raw.autoFetchMaxMb, 1, 50, DEFAULT_SETTINGS.autoFetchMaxMb),
+      autoFetchMaxPages: GEJQ.clampInt(raw && raw.autoFetchMaxPages, 1, 1000, DEFAULT_SETTINGS.autoFetchMaxPages),
+      autoFetchMaxMb: GEJQ.clampInt(raw && raw.autoFetchMaxMb, 1, 50, DEFAULT_SETTINGS.autoFetchMaxMb),
       queryLanguage: raw && LANGUAGES[raw.queryLanguage] ? raw.queryLanguage : DEFAULT_SETTINGS.queryLanguage,
       historyLimit: historyLimit
     };
@@ -411,6 +414,7 @@
   /** Re-apply everything that depends on the selected query language. */
   function applyLanguage() {
     var language = LANGUAGES[state.settings.queryLanguage];
+    ui.titleLabel.textContent = 'JSON Query (' + language.label + ')';
     ui.queryInput.placeholder = language.placeholder;
     if (ui.languageSelect.value !== state.settings.queryLanguage) {
       ui.languageSelect.value = state.settings.queryLanguage;
@@ -491,16 +495,14 @@
   // --------------------------------------------------------------- history
 
   function optionLabel(entry) {
-    var time = new Date(entry.timestamp);
-    var pad = function (n) {
-      return (n < 10 ? '0' : '') + n;
-    };
-    var clock = pad(time.getHours()) + ':' + pad(time.getMinutes()) + ':' + pad(time.getSeconds());
     var status = entry.manual ? 'pasted' : entry.status;
     if (entry.pages) {
       status += ' · ' + entry.pages + ' pages' + (entry.truncated ? ', incomplete' : '');
     }
-    return clock + ' · ' + entry.method + ' ' + GEJQ.summarizeUrl(entry.url, 60) + ' (' + status + ')';
+    return (
+      GEJQ.formatTimestamp(entry.timestamp) +
+      ' · ' + entry.method + ' ' + GEJQ.summarizeUrl(entry.url, 60) + ' (' + status + ')'
+    );
   }
 
   function refreshHistorySelect() {
@@ -605,7 +607,11 @@
    */
   function populateGraphExplorer(method, url) {
     method = String(method || 'GET').toUpperCase();
-    var input = document.querySelector('input[aria-label="Query sample input" i]');
+    // The aria-label is localized; #request-area is a stable structural
+    // fallback so the in-place path also works on non-English locales.
+    var input =
+      document.querySelector('input[aria-label="Query sample input" i]') ||
+      document.querySelector('#request-area input[type="text"]');
     var methodControl = document.querySelector('[aria-label="HTTP request method option" i]');
     var currentMethod = methodControl && methodControl.textContent
       ? methodControl.textContent.trim().toUpperCase()
@@ -957,7 +963,8 @@
     var header = el('header', 'gejq-header');
     var title = el('div', 'gejq-title');
     title.appendChild(el('span', 'gejq-title-icon', '{;}'));
-    title.appendChild(el('span', null, 'JSON Query (JMESPath)'));
+    var titleLabel = el('span', null, 'JSON Query'); // suffixed by applyLanguage()
+    title.appendChild(titleLabel);
     header.appendChild(title);
     var headerButtons = el('div', 'gejq-header-buttons');
     headerButtons.appendChild(
@@ -998,22 +1005,21 @@
     queryRow.appendChild(languageSelect);
     var queryInput = el('textarea', 'gejq-query-input');
     queryInput.rows = 2;
-    queryInput.placeholder = LANGUAGES.jmespath.placeholder;
-    queryInput.spellcheck = false;
+    queryInput.spellcheck = false; // placeholder is set by applyLanguage()
     queryInput.addEventListener('input', function () {
       state.query = queryInput.value;
       storageSet(STORAGE_KEY_QUERY, queryInput.value);
       scheduleRun();
     });
+    // Recording happens only on deliberate runs (Enter or chip clicks) —
+    // a blur handler would capture half-typed queries when the focus
+    // moves to a suggestion chip.
     queryInput.addEventListener('keydown', function (event) {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         runQuery();
         recordQuery();
       }
-    });
-    queryInput.addEventListener('blur', function () {
-      recordQuery();
     });
     queryRow.appendChild(queryInput);
     panel.appendChild(queryRow);
@@ -1080,7 +1086,9 @@
     var downloadButton = button('gejq-action', 'Download', 'Download the query result in the selected format', function () {
       var payload = exportPayload();
       if (payload !== null) {
-        downloadText(payload.text, payload.filename, payload.mime);
+        // UTF-8 BOM so Excel opens downloaded CSVs with correct accents.
+        var text = payload.mime === 'text/csv' ? '\uFEFF' + payload.text : payload.text;
+        downloadText(text, payload.filename, payload.mime);
       }
     });
     footer.appendChild(copyButton);
@@ -1130,6 +1138,7 @@
       fab: fab,
       fabBadge: fabBadge,
       panel: panel,
+      titleLabel: titleLabel,
       historySelect: historySelect,
       queryInput: queryInput,
       error: error,

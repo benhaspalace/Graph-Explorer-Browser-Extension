@@ -15,6 +15,15 @@
 
   var PLAIN_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+  /** Clamp to an integer in [min, max]; `fallback` when not a usable number. */
+  function clampInt(value, min, max, fallback) {
+    var parsed = typeof value === 'string' ? parseInt(value, 10) : value;
+    if (typeof parsed === 'number' && isFinite(parsed) && parsed >= min) {
+      return Math.min(Math.floor(parsed), max);
+    }
+    return fallback;
+  }
+
   /** Quote a JSON key so it is a valid JMESPath identifier. */
   function jmesKey(key) {
     if (PLAIN_IDENTIFIER.test(key)) {
@@ -380,12 +389,41 @@
   }
 
   /**
+   * How a value can be represented as CSV: 'objects' (array of flat
+   * objects), 'scalars' (array of primitives), or null (not CSV-able).
+   */
+  function csvShape(value) {
+    if (!Array.isArray(value) || value.length === 0) {
+      return null;
+    }
+    var allObjects = value.every(function (row) {
+      return row !== null && typeof row === 'object' && !Array.isArray(row);
+    });
+    if (allObjects) {
+      var hasColumns = value.some(function (row) {
+        return Object.keys(row).length > 0;
+      });
+      return hasColumns ? 'objects' : null;
+    }
+    var allScalars = value.every(function (row) {
+      return row === null || typeof row !== 'object';
+    });
+    return allScalars ? 'scalars' : null;
+  }
+
+  /** Cheap check (no string building) used to enable/disable CSV export. */
+  function csvEligible(value) {
+    return csvShape(value) !== null;
+  }
+
+  /**
    * Convert a query result to CSV. Supports arrays of flat objects
    * (nested values are JSON-encoded into the cell) and arrays of scalars.
    * Returns null when the value has no sensible CSV representation.
    */
   function toCsv(value) {
-    if (!Array.isArray(value) || value.length === 0) {
+    var shape = csvShape(value);
+    if (shape === null) {
       return null;
     }
 
@@ -405,12 +443,8 @@
       return text;
     }
 
-    var allObjects = value.every(function (row) {
-      return row !== null && typeof row === 'object' && !Array.isArray(row);
-    });
-
     var lines = [];
-    if (allObjects) {
+    if (shape === 'objects') {
       var columns = [];
       value.forEach(function (row) {
         Object.keys(row).forEach(function (key) {
@@ -419,9 +453,6 @@
           }
         });
       });
-      if (columns.length === 0) {
-        return null;
-      }
       lines.push(columns.map(escapeCell).join(','));
       value.forEach(function (row) {
         lines.push(
@@ -435,12 +466,6 @@
       return lines.join('\r\n');
     }
 
-    var allScalars = value.every(function (row) {
-      return row === null || typeof row !== 'object';
-    });
-    if (!allScalars) {
-      return null;
-    }
     lines.push('value');
     value.forEach(function (row) {
       lines.push(escapeCell(row));
@@ -448,14 +473,55 @@
     return lines.join('\r\n');
   }
 
+  /**
+   * File name for an exported result: derived from the Graph request's
+   * resource path plus a local timestamp, e.g.
+   * "graph-users-messages-2026-08-08-093005.csv". Falls back to
+   * "graph-query-…" when the source URL is not a real URL (pasted JSON).
+   * `now` is injectable for tests.
+   */
+  function exportFilename(url, extension, now) {
+    var base = 'graph-query';
+    try {
+      var segments = new URL(url).pathname
+        .split('/')
+        .filter(function (segment) {
+          return segment !== '' && !/^(v1\.0|beta)$/i.test(segment);
+        })
+        .slice(-2)
+        .map(function (segment) {
+          return decodeURIComponent(segment).toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+        })
+        .filter(function (segment) {
+          return segment !== '';
+        });
+      if (segments.length > 0) {
+        base = 'graph-' + segments.join('-');
+      }
+    } catch (e) {
+      /* not a URL — keep the fallback base */
+    }
+    var time = new Date(now === undefined ? Date.now() : now);
+    var pad = function (n) {
+      return (n < 10 ? '0' : '') + n;
+    };
+    var stamp =
+      time.getFullYear() + '-' + pad(time.getMonth() + 1) + '-' + pad(time.getDate()) +
+      '-' + pad(time.getHours()) + pad(time.getMinutes()) + pad(time.getSeconds());
+    return base + '-' + stamp + '.' + extension;
+  }
+
   return {
     jmesKey: jmesKey,
     jsonPathKey: jsonPathKey,
+    clampInt: clampInt,
     applyAdvancedQuery: applyAdvancedQuery,
     parseGraphRequest: parseGraphRequest,
     buildDeepLink: buildDeepLink,
     upsertQueryHistory: upsertQueryHistory,
     formatTimestamp: formatTimestamp,
+    csvEligible: csvEligible,
+    exportFilename: exportFilename,
     safeJsonParse: safeJsonParse,
     describeResult: describeResult,
     formatBytes: formatBytes,

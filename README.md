@@ -61,13 +61,20 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
 
 The extension is plain JavaScript — no build step.
 
-1. Clone or [download](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/archive/refs/heads/main.zip) this repository.
-2. **Chrome:** open `chrome://extensions` · **Edge:** open `edge://extensions`.
-3. Enable **Developer mode** (Chrome: toggle top-right; Edge: toggle in the left sidebar).
-4. Click **Load unpacked** and select the repository folder (the one containing `manifest.json`).
-5. Open [Graph Explorer](https://developer.microsoft.com/en-us/graph/graph-explorer) and run any query.
+**Option A — download a build artifact (recommended):**
 
-Requires Chrome/Edge 111 or newer.
+1. Open the repository's **Actions** tab, pick the latest green **Build** run
+   on `main`, and download the `graph-explorer-json-query-v…` artifact.
+2. Unzip it somewhere permanent.
+3. **Chrome:** open `chrome://extensions` · **Edge:** open `edge://extensions`.
+4. Enable **Developer mode** (Chrome: toggle top-right; Edge: toggle in the left sidebar).
+5. Click **Load unpacked** and select the unzipped folder (the one containing `manifest.json`).
+
+**Option B — from a clone:** same steps, but select the repository folder
+itself as the unpacked extension.
+
+Then open [Graph Explorer](https://developer.microsoft.com/en-us/graph/graph-explorer)
+and run any query. Requires Chrome/Edge 111 or newer.
 
 ## Usage
 
@@ -138,12 +145,27 @@ method + URL of the Graph request it ran against — never response data).
 
 ```bash
 npm test        # unit tests (node:test, no dependencies)
+npm run e2e     # offline end-to-end smoke test (needs Playwright + Chromium)
 npm run icons   # regenerate icons/ from scripts/make-icons.js
 npm run package # zip the extension into dist/ for store submission
 ```
 
 The repository root is the extension — edit, then hit **Reload** on the
 extensions page to pick up changes.
+
+The e2e test loads the extension into headless Chromium and drives it
+against a Graph Explorer stand-in served via Playwright route
+interception, so it needs no network. Install Playwright first:
+`npm i -D playwright && npx playwright install chromium`.
+
+CI (`.github/workflows/build.yml`) runs both suites on every push and PR
+to `main` and uploads a ready-to-load extension artifact.
+
+**Note on non-English locales:** in-place editor population and auto
+sign-in locate Graph Explorer controls primarily by their English
+aria-labels (with a structural fallback for the request input). On other
+locales the Load button falls back to the deep link — which still works —
+and auto sign-in may not trigger.
 
 ### Repository layout
 

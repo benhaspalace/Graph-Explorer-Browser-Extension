@@ -44,13 +44,6 @@
     autoFetchMaxChars: 10 * 1024 * 1024
   };
 
-  function positiveInt(value, fallback, max) {
-    if (typeof value === 'number' && isFinite(value) && value >= 1) {
-      return Math.min(Math.floor(value), max);
-    }
-    return fallback;
-  }
-
   window.addEventListener('message', function (event) {
     if (event.source !== window || event.origin !== window.location.origin) {
       return;
@@ -59,19 +52,16 @@
     if (data && data.source === SETTINGS_SOURCE && data.settings && typeof data.settings === 'object') {
       settings.advancedQuery = data.settings.advancedQuery !== false;
       settings.autoFetchNextLink = data.settings.autoFetchNextLink === true;
-      settings.autoFetchMaxPages = positiveInt(data.settings.autoFetchMaxPages, 50, 1000);
-      settings.autoFetchMaxChars = positiveInt(data.settings.autoFetchMaxChars, 10 * 1024 * 1024, 50 * 1024 * 1024);
+      settings.autoFetchMaxPages = GEJQ.clampInt(data.settings.autoFetchMaxPages, 1, 1000, 50);
+      settings.autoFetchMaxChars = GEJQ.clampInt(data.settings.autoFetchMaxChars, 1, 50 * 1024 * 1024, 10 * 1024 * 1024);
     }
   });
 
   function isGraphHost(hostname) {
     var h = String(hostname || '').toLowerCase();
-    for (var i = 0; i < GRAPH_HOSTS.length; i++) {
-      if (h === GRAPH_HOSTS[i] || h.slice(-(GRAPH_HOSTS[i].length + 1)) === '.' + GRAPH_HOSTS[i]) {
-        return true;
-      }
-    }
-    return false;
+    return GRAPH_HOSTS.some(function (graphHost) {
+      return h === graphHost || h.endsWith('.' + graphHost);
+    });
   }
 
   /**
@@ -237,10 +227,15 @@
               totalSize += text.length;
               combinedValue = combinedValue.concat(pageJson.value);
               pages += 1;
-              if (typeof pageJson['@odata.nextLink'] === 'string') {
-                step(pageJson['@odata.nextLink']);
-              } else {
+              var next = pageJson['@odata.nextLink'];
+              if (typeof next !== 'string') {
                 finish();
+              } else if (totalSize > settings.autoFetchMaxChars) {
+                // Checked after accumulating too, so the size limit is a
+                // hard ceiling rather than "limit plus one page".
+                finish(next);
+              } else {
+                step(next);
               }
             })
             .catch(function () {
@@ -294,20 +289,20 @@
       return [advanced.url, newInit];
     }
     if (input instanceof Request) {
-      var requestHeaders = new Headers(input.headers);
+      var mergedHeaders = new Headers(input.headers);
       if (init && init.headers) {
         new Headers(init.headers).forEach(function (headerValue, headerName) {
-          requestHeaders.set(headerName, headerValue);
+          mergedHeaders.set(headerName, headerValue);
         });
       }
-      if (!requestHeaders.has('ConsistencyLevel')) {
-        requestHeaders.set('ConsistencyLevel', 'eventual');
+      if (!mergedHeaders.has('ConsistencyLevel')) {
+        mergedHeaders.set('ConsistencyLevel', 'eventual');
       }
       // GET/HEAD requests carry no body, so all other fields can be
       // copied from the original Request while swapping the URL.
       var rebuilt = new Request(advanced.url, {
         method: input.method,
-        headers: requestHeaders,
+        headers: mergedHeaders,
         mode: input.mode,
         credentials: input.credentials,
         cache: input.cache,

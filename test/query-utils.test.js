@@ -243,6 +243,55 @@ test('formatTimestamp shows clock time today and full date otherwise', () => {
   assert.equal(GEJQ.formatTimestamp(lastWeek, noon), '2026-07-30 09:05');
 });
 
+test('clampInt clamps numbers and numeric strings, falls back otherwise', () => {
+  assert.equal(GEJQ.clampInt(5, 1, 10, 3), 5);
+  assert.equal(GEJQ.clampInt(99, 1, 10, 3), 10);
+  assert.equal(GEJQ.clampInt(0, 1, 10, 3), 3);
+  assert.equal(GEJQ.clampInt(7.9, 1, 10, 3), 7);
+  assert.equal(GEJQ.clampInt('42', 1, 100, 3), 42);
+  assert.equal(GEJQ.clampInt('nope', 1, 10, 3), 3);
+  assert.equal(GEJQ.clampInt(undefined, 1, 10, 3), 3);
+  assert.equal(GEJQ.clampInt(NaN, 1, 10, 3), 3);
+});
+
+test('csvEligible agrees with toCsv across shapes', () => {
+  const shapes = [
+    [{ a: 1 }, { b: 2 }],
+    [{}],
+    [{}, { a: 1 }],
+    ['a', 'b'],
+    [1, null, true],
+    [],
+    [{ a: 1 }, 'mixed'],
+    [[1, 2]],
+    { a: 1 },
+    'scalar',
+    null,
+    42
+  ];
+  for (const shape of shapes) {
+    assert.equal(
+      GEJQ.csvEligible(shape),
+      GEJQ.toCsv(shape) !== null,
+      'csvEligible must match toCsv for ' + JSON.stringify(shape)
+    );
+  }
+});
+
+test('exportFilename derives a name from the request path plus timestamp', () => {
+  const now = new Date(2026, 7, 8, 9, 30, 5).getTime();
+  assert.equal(
+    GEJQ.exportFilename('https://graph.microsoft.com/v1.0/me/messages?$top=5', 'json', now),
+    'graph-me-messages-2026-08-08-093005.json'
+  );
+  assert.equal(
+    GEJQ.exportFilename('https://graph.microsoft.com/beta/users', 'csv', now),
+    'graph-users-2026-08-08-093005.csv'
+  );
+  assert.equal(GEJQ.exportFilename('pasted JSON #1', 'json', now), 'graph-query-2026-08-08-093005.json');
+  assert.equal(GEJQ.exportFilename('', 'json', now), 'graph-query-2026-08-08-093005.json');
+});
+
 test('toCsv converts arrays of objects with union of columns', () => {
   const csv = GEJQ.toCsv([
     { name: 'Adele', mail: 'a@x.com' },

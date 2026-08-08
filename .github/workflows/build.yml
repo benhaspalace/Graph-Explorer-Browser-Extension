@@ -1,0 +1,70 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run unit tests
+        run: npm test
+
+  e2e:
+    name: End-to-end smoke test
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Playwright
+        run: |
+          npm install --no-save playwright@1.56.1
+          npx playwright install --with-deps chromium
+      - name: Run smoke test (offline, route-intercepted)
+        run: npm run e2e
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: test/e2e/artifacts
+          if-no-files-found: ignore
+
+  package:
+    name: Package extension
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify manifest and version
+        id: meta
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8'))"
+          echo "version=$(node -p "require('./manifest.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Stage extension files
+        run: |
+          mkdir -p dist/graph-explorer-json-query
+          cp -r manifest.json icons popup src vendor LICENSE dist/graph-explorer-json-query/
+      # upload-artifact zips the staged folder itself, so the download is a
+      # single zip: unzip it and "Load unpacked" the inner folder.
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: graph-explorer-json-query-v${{ steps.meta.outputs.version }}
+          path: dist/graph-explorer-json-query
+          if-no-files-found: error

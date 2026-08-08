@@ -36,29 +36,22 @@ try {
 // Enter also opens Graph Explorer: the button is focused when the popup opens.
 openExplorerLink.focus();
 
-var settings = {};
-
-function clampInt(value, min, max, fallback) {
-  var parsed = typeof value === 'string' ? parseInt(value, 10) : value;
-  if (typeof parsed === 'number' && isFinite(parsed) && parsed >= min) {
-    return Math.min(Math.floor(parsed), max);
-  }
-  return fallback;
-}
-
-chrome.storage.local.get([STORAGE_KEY_SETTINGS], function (items) {
-  settings = items[STORAGE_KEY_SETTINGS] || {};
+function render(settings) {
   languageSelect.value = settings.queryLanguage === 'jsonpath' ? 'jsonpath' : 'jmespath';
   // advancedQuery and autoSignIn default to on; autoFetchNextLink to off.
   advancedQueryBox.checked = settings.advancedQuery !== false;
   autoSignInBox.checked = settings.autoSignIn !== false;
   autoFetchBox.checked = settings.autoFetchNextLink === true;
-  autoFetchPagesInput.value = String(clampInt(settings.autoFetchMaxPages, 1, 1000, 50));
-  autoFetchMbInput.value = String(clampInt(settings.autoFetchMaxMb, 1, 50, 10));
+  autoFetchPagesInput.value = String(GEJQ.clampInt(settings.autoFetchMaxPages, 1, 1000, 50));
+  autoFetchMbInput.value = String(GEJQ.clampInt(settings.autoFetchMaxMb, 1, 50, 10));
   var limit = typeof settings.historyLimit === 'number' && settings.historyLimit >= 0 ? settings.historyLimit : 50;
   historyUnlimitedBox.checked = limit === 0;
   historyLimitInput.disabled = limit === 0;
   historyLimitInput.value = limit === 0 ? '' : String(limit);
+}
+
+chrome.storage.local.get([STORAGE_KEY_SETTINGS], function (items) {
+  render(items[STORAGE_KEY_SETTINGS] || {});
 });
 
 function save() {
@@ -66,22 +59,25 @@ function save() {
   if (historyUnlimitedBox.checked) {
     limit = 0; // unlimited
   } else {
-    limit = parseInt(historyLimitInput.value, 10);
-    if (!isFinite(limit) || limit < 1) {
-      limit = 50;
-    }
+    limit = GEJQ.clampInt(historyLimitInput.value, 1, 10000, 50);
   }
   historyLimitInput.disabled = historyUnlimitedBox.checked;
-  settings.queryLanguage = languageSelect.value === 'jsonpath' ? 'jsonpath' : 'jmespath';
-  settings.advancedQuery = advancedQueryBox.checked;
-  settings.autoSignIn = autoSignInBox.checked;
-  settings.autoFetchNextLink = autoFetchBox.checked;
-  settings.autoFetchMaxPages = clampInt(autoFetchPagesInput.value, 1, 1000, 50);
-  settings.autoFetchMaxMb = clampInt(autoFetchMbInput.value, 1, 50, 10);
-  settings.historyLimit = limit;
-  var items = {};
-  items[STORAGE_KEY_SETTINGS] = settings;
-  chrome.storage.local.set(items);
+  // Re-read before writing: the panel can change settings (e.g. the
+  // query language) while this popup is open, and a stale snapshot
+  // would silently overwrite them.
+  chrome.storage.local.get([STORAGE_KEY_SETTINGS], function (items) {
+    var settings = items[STORAGE_KEY_SETTINGS] || {};
+    settings.queryLanguage = languageSelect.value === 'jsonpath' ? 'jsonpath' : 'jmespath';
+    settings.advancedQuery = advancedQueryBox.checked;
+    settings.autoSignIn = autoSignInBox.checked;
+    settings.autoFetchNextLink = autoFetchBox.checked;
+    settings.autoFetchMaxPages = GEJQ.clampInt(autoFetchPagesInput.value, 1, 1000, 50);
+    settings.autoFetchMaxMb = GEJQ.clampInt(autoFetchMbInput.value, 1, 50, 10);
+    settings.historyLimit = limit;
+    var toStore = {};
+    toStore[STORAGE_KEY_SETTINGS] = settings;
+    chrome.storage.local.set(toStore);
+  });
 }
 
 languageSelect.addEventListener('change', save);
