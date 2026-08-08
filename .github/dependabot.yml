@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions current: Dependabot opens PRs that bump
+  # both the pin and the version comment when an action publishes a new
+  # release, so pinning to a commit does not mean going stale.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # The shipped extension has no npm dependencies; this covers the pinned
+  # dev/test tool (Playwright) referenced in package.json / the workflow.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps

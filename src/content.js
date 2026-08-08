@@ -41,7 +41,8 @@
     autoFetchMaxMb: 10,
     queryLanguage: 'jmespath',
     historyLimit: 50, // 0 = unlimited
-    showBackgroundRequests: false
+    showBackgroundRequests: false,
+    richEditor: true // CodeMirror editor by default; can fall back to a plain textarea
   });
   // The signed-out "profile view" button in Graph Explorer's top bar —
   // clicking it starts the sign-in flow.
@@ -101,6 +102,7 @@
     open: false, // panel visible (embedded: expanded; floating: drawer open)
     collapsedPref: false, // user preference: keep the embedded panel hidden
     format: 'json', // result view + export format: 'json' | 'csv' | 'tree'
+    copyFormat: 'csv', // delimiter for Copy/Download in CSV mode: 'csv' | 'tsv'
     tableSort: { column: null, dir: 1 }, // table-view sorting (csv mode)
     lastValue: undefined, // last successful query result (sort re-render)
     lastRenderKey: '', // response id + query — resets table sorting
@@ -695,12 +697,20 @@
     var response = selectedResponse();
     var sourceUrl = response ? response.url : '';
     if (state.format === 'csv') {
-      // Export what the table shows — the applied sorting included.
-      var csv = GEJQ.toCsv(sortedTableRows(outcome.value));
-      if (csv === null) {
+      // Export what the table shows — the applied sorting included — in the
+      // delimiter the copy-format dropdown selects (CSV or TSV).
+      var rows = sortedTableRows(outcome.value);
+      var tsv = state.copyFormat === 'tsv';
+      var text = tsv ? GEJQ.toTsv(rows) : GEJQ.toCsv(rows);
+      if (text === null) {
         return null;
       }
-      return { text: csv, filename: GEJQ.exportFilename(sourceUrl, 'csv'), mime: 'text/csv' };
+      return {
+        text: text,
+        filename: GEJQ.exportFilename(sourceUrl, tsv ? 'tsv' : 'csv'),
+        mime: tsv ? 'text/tab-separated-values' : 'text/csv',
+        bom: true // UTF-8 BOM so Excel reads accents in both CSV and TSV
+      };
     }
     return {
       text: JSON.stringify(outcome.value, null, 2),
@@ -736,7 +746,9 @@
     var exportable = diffing ? state.diffText !== '' : hasResult && (state.format !== 'csv' || csvOk);
     ui.copyButton.disabled = !exportable;
     ui.downloadButton.disabled = !exportable;
-    ui.tsvButton.disabled = diffing || !csvOk;
+    // The CSV/TSV copy-format dropdown only applies in CSV (table) mode.
+    var showCopyFormat = !diffing && state.format === 'csv' && csvOk;
+    ui.copyFormatSelect.style.display = showCopyFormat ? '' : 'none';
   }
 
   function setFormat(format) {
@@ -759,7 +771,8 @@
       autoFetchMaxMb: GEJQ.clampInt(raw && raw.autoFetchMaxMb, 1, 50, DEFAULT_SETTINGS.autoFetchMaxMb),
       queryLanguage: raw && LANGUAGES[raw.queryLanguage] ? raw.queryLanguage : DEFAULT_SETTINGS.queryLanguage,
       historyLimit: historyLimit,
-      showBackgroundRequests: !!raw && raw.showBackgroundRequests === true
+      showBackgroundRequests: !!raw && raw.showBackgroundRequests === true,
+      richEditor: !raw || raw.richEditor !== false
     };
   }
 
@@ -2097,7 +2110,7 @@
    * replaceRange never fire the input handler — callers do their own
    * bookkeeping, mirroring how assigning input.value works.
    */
-  function createQueryEditor() {
+  function createQueryEditor(root) {
     var handlers = {
       input: function () {
         state.query = editor.getValue();
@@ -2140,8 +2153,37 @@
         setTimeout(closeAutocomplete, 150);
       }
     };
-    var editor = window.GEJQCM ? codeMirrorEditor(handlers) : textareaEditor(handlers);
+    var useRich = state.settings.richEditor && window.GEJQCM;
+    var editor = useRich ? codeMirrorEditor(handlers, root) : textareaEditor(handlers);
+    editor.rich = !!useRich;
     return editor;
+  }
+
+  /**
+   * Rebuild the query editor in place when the editor-mode setting flips.
+   * Preserves the current query text and focus; destroys the old instance.
+   */
+  function swapQueryEditor() {
+    if (!ui || !ui.queryEditor) {
+      return;
+    }
+    var wantRich = state.settings.richEditor && window.GEJQCM;
+    if (ui.queryEditor.rich === wantRich) {
+      return;
+    }
+    var current = ui.queryEditor.getValue();
+    var oldNode = ui.queryEditor.node;
+    if (ui.queryEditor.destroy) {
+      ui.queryEditor.destroy();
+    }
+    var next = createQueryEditor(ui.shadow);
+    oldNode.parentNode.replaceChild(next.node, oldNode);
+    ui.queryEditor = next;
+    ui.queryInput = next.node;
+    next.setLanguage(state.settings.queryLanguage);
+    next.setPlaceholder(LANGUAGES[state.settings.queryLanguage].placeholder);
+    next.setValue(current);
+    closeAutocomplete();
   }
 
   function textareaEditor(handlers) {
@@ -2173,11 +2215,12 @@
       setPlaceholder: function (text) {
         input.placeholder = text;
       },
-      setLanguage: function () {}
+      setLanguage: function () {},
+      destroy: function () {}
     };
   }
 
-  function codeMirrorEditor(handlers) {
+  function codeMirrorEditor(handlers, root) {
     var cm = window.GEJQCM;
     var container = el('div', 'gejq-query-input gejq-query-editor');
     var programmatic = false;
@@ -2203,6 +2246,12 @@
     }
     var view = new cm.EditorView({
       parent: container,
+      // Critical inside a ShadowRoot: CodeMirror must know its root node so
+      // it injects its stylesheet there (not document.head, which the shadow
+      // DOM can't see) and reads the browser selection from the right root.
+      // Without this the caret jumps to position 0 on every edit and the
+      // screen-reader "announced" region shows through unstyled.
+      root: root || document,
       state: cm.EditorState.create({
         doc: '',
         extensions: [
@@ -2275,6 +2324,9 @@
       },
       setLanguage: function (languageKey) {
         view.dispatch({ effects: languageCompartment.reconfigure(streamLanguage(languageKey)) });
+      },
+      destroy: function () {
+        view.destroy();
       }
     };
     container.dataset.query = '';
@@ -2450,7 +2502,7 @@
     });
     queryRow.appendChild(languageSelect);
     var queryWrap = el('div', 'gejq-query-wrap');
-    var queryEditor = createQueryEditor();
+    var queryEditor = createQueryEditor(shadow);
     var autocompleteList = el('div', 'gejq-autocomplete');
     autocompleteList.style.display = 'none';
     queryWrap.appendChild(queryEditor.node);
@@ -2609,25 +2661,32 @@
         copyText(payload.text, copyButton, 'Copied ✓');
       }
     });
-    var tsvButton = button('gejq-action gejq-action-small', 'TSV', 'Copy as tab-separated values — pastes into Excel as a grid (sorted like the table)', function () {
-      var outcome = currentResult();
-      if (!outcome.error && outcome.value !== undefined) {
-        var tsv = GEJQ.toTsv(sortedTableRows(outcome.value));
-        if (tsv !== null) {
-          copyText(tsv, tsvButton, '✓');
-        }
-      }
+    // In CSV (table) mode, this picks the delimiter for Copy and Download.
+    // Hidden in JSON/Tree modes (see updateExportButtons).
+    var copyFormatSelect = el('select', 'gejq-copy-format');
+    copyFormatSelect.title = 'Copy / Download format';
+    [
+      { value: 'csv', label: 'CSV' },
+      { value: 'tsv', label: 'TSV' }
+    ].forEach(function (choice) {
+      var option = el('option', null, choice.label);
+      option.value = choice.value;
+      copyFormatSelect.appendChild(option);
+    });
+    copyFormatSelect.value = state.copyFormat;
+    copyFormatSelect.addEventListener('change', function () {
+      state.copyFormat = copyFormatSelect.value === 'tsv' ? 'tsv' : 'csv';
     });
     var downloadButton = button('gejq-action', 'Download', 'Download the query result in the selected format', function () {
       var payload = exportPayload();
       if (payload !== null) {
-        // UTF-8 BOM so Excel opens downloaded CSVs with correct accents.
-        var text = payload.mime === 'text/csv' ? '\uFEFF' + payload.text : payload.text;
+        // UTF-8 BOM so Excel opens downloaded CSV/TSV with correct accents.
+        var text = payload.bom ? '\uFEFF' + payload.text : payload.text;
         downloadText(text, payload.filename, payload.mime);
       }
     });
     footer.appendChild(copyButton);
-    footer.appendChild(tsvButton);
+    footer.appendChild(copyFormatSelect);
     footer.appendChild(downloadButton);
     panel.appendChild(footer);
 
@@ -2671,6 +2730,7 @@
 
     ui = {
       host: host,
+      shadow: shadow,
       fab: fab,
       fabBadge: fabBadge,
       panel: panel,
@@ -2698,7 +2758,7 @@
       historyFilterRow: historyFilterRow,
       historyTagChips: historyTagChips,
       copyButton: copyButton,
-      tsvButton: tsvButton,
+      copyFormatSelect: copyFormatSelect,
       downloadButton: downloadButton,
       jsonToggle: jsonToggle,
       csvToggle: csvToggle,
@@ -2882,8 +2942,12 @@
         }
         var previousLanguage = state.settings.queryLanguage;
         var previousShowBackground = state.settings.showBackgroundRequests;
+        var previousRichEditor = state.settings.richEditor;
         state.settings = normalizeSettings(changes[STORAGE_KEY_SETTINGS].newValue);
         pushSettingsToPage();
+        if (ui && state.settings.richEditor !== previousRichEditor) {
+          swapQueryEditor();
+        }
         if (ui && state.settings.showBackgroundRequests !== previousShowBackground) {
           refreshHistorySelect();
           updateBadge();
