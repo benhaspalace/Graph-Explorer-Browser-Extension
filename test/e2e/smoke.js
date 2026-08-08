@@ -77,15 +77,25 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   }
   document.getElementById('fake-body-tab').addEventListener('click', function () { selectTab('body'); });
   document.getElementById('request-headers').addEventListener('click', function () { selectTab('headers'); });
-  document.getElementById('ge-add-header').addEventListener('click', function () {
-    var name = document.querySelector('input[name="name"]');
-    var value = document.querySelector('input[name="value"]');
-    if (!name.value) return;
+  // Like real GE, the Add button stays disabled until both inputs have
+  // values (React-processed) — the extension must wait for that.
+  var headerName = document.querySelector('input[name="name"]');
+  var headerValue = document.querySelector('input[name="value"]');
+  var addHeaderBtn = document.getElementById('ge-add-header');
+  function syncAddButton() {
+    addHeaderBtn.disabled = !(headerName.value && headerValue.value);
+  }
+  syncAddButton();
+  headerName.addEventListener('input', function () { setTimeout(syncAddButton, 30); });
+  headerValue.addEventListener('input', function () { setTimeout(syncAddButton, 30); });
+  addHeaderBtn.addEventListener('click', function () {
+    if (!headerName.value) return;
     var li = document.createElement('li');
-    li.textContent = name.value + ': ' + value.value;
+    li.textContent = headerName.value + ': ' + headerValue.value;
     document.getElementById('ge-header-list').appendChild(li);
-    name.value = '';
-    value.value = '';
+    headerName.value = '';
+    headerValue.value = '';
+    syncAddButton();
   });
 </script>
 </body></html>`;
@@ -508,7 +518,22 @@ function check(name, ok, extra) {
   await page.waitForTimeout(400);
   check('jq iteration query works', (await page.locator('.gejq-result').innerText()).includes('Lidia Holloway'));
 
-  // 10f2. Tier-1 autocomplete in the query input.
+  // 10f2. Tier-2 autocomplete: property names from the selected response.
+  await query.fill('.value[].ma');
+  await page.waitForTimeout(300);
+  const propItems = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const list = shadow.querySelector('.gejq-autocomplete');
+    return list.style.display === 'none'
+      ? null
+      : Array.from(list.querySelectorAll('.gejq-ac-label')).map((l) => l.textContent);
+  });
+  check('property completion offers response keys', !!propItems && propItems.includes('mail'), (propItems || []).join(' | '));
+  await query.press('Enter');
+  await page.waitForTimeout(200);
+  check('accepting property completion builds the path', (await query.inputValue()) === '.value[].mail', await query.inputValue());
+
+  // Tier-1 autocomplete: language builtins.
   await query.fill('.value | uniq');
   await page.waitForTimeout(300);
   const acItems = await page.evaluate(() => {
@@ -551,16 +576,21 @@ function check(name, ok, extra) {
   await page.waitForTimeout(200);
   check('JSON view restored', (await page.locator('.gejq-result').innerText()).trim().startsWith('['));
 
-  // 10h. Response info line: full selectable URL plus live indicator.
+  // 10h. Response row: full selectable text with timestamp, URL, status,
+  // and the inline live indicator.
   const info = await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     return {
       badge: shadow.querySelector('.gejq-live-badge').textContent,
-      url: shadow.querySelector('.gejq-response-url').textContent
+      text: shadow.querySelector('.gejq-response-text').value
     };
   });
-  check('response info shows live badge', info.badge.includes('live'), info.badge);
-  check('response info shows full URL', info.url.includes('https://graph.microsoft.com/v1.0/users?paged=1'), info.url);
+  check('response row shows live badge inline', info.badge.includes('live'), info.badge);
+  check(
+    'response row combines timestamp, full URL, and status',
+    /^\d\d:\d\d:\d\d · GET https:\/\/graph\.microsoft\.com\/v1\.0\/users\?paged=1 → 200/.test(info.text),
+    info.text
+  );
   await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     const select = shadow.querySelector('.gejq-history-select');
@@ -611,12 +641,72 @@ function check(name, ok, extra) {
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   });
   await page.waitForTimeout(300);
-  const headings = await page.evaluate(() => {
+  const historyState = await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
-    return Array.from(shadow.querySelectorAll('.gejq-query-history .gejq-help-heading')).map((h) => h.textContent);
+    return {
+      headings: Array.from(shadow.querySelectorAll('.gejq-query-history .gejq-help-heading')).map((h) => h.textContent),
+      rowMetas: Array.from(shadow.querySelectorAll('.gejq-query-history .gejq-example-label')).map((s) => s.textContent)
+    };
   });
-  check('favorites group first', headings[0] === '★ Favorites', headings.join(' | '));
-  check('tag group present', headings.includes('counts'), headings.join(' | '));
+  check('favorites group pinned first', historyState.headings[0] === '★ Favorites', historyState.headings.join(' | '));
+  check('no per-tag groups (tags shown inline)', !historyState.headings.includes('counts') && historyState.rowMetas.some((m) => m.includes('#counts')), historyState.headings.join(' | '));
+
+  // 10i2. History filtering: free text, tag chips.
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    shadow.querySelectorAll('details').forEach((d) => {
+      if (d.querySelector('.gejq-hist-filter-text')) {
+        d.open = true; // expand the history section so the filter bar is interactable
+      }
+    });
+  });
+  const rowsBefore = await page.evaluate(
+    () => document.getElementById('gejq-host').shadowRoot.querySelectorAll('.gejq-query-history .gejq-example').length
+  );
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const chip = Array.from(shadow.querySelectorAll('.gejq-hist-tags .gejq-chip')).find((c) => c.textContent === '#counts');
+    chip.click();
+  });
+  await page.waitForTimeout(200);
+  const tagFiltered = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      rows: shadow.querySelectorAll('.gejq-query-history .gejq-example').length,
+      summary: shadow.querySelectorAll('.gejq-panel details summary')[0] ? Array.from(shadow.querySelectorAll('.gejq-panel details summary')).map((s) => s.textContent).find((t) => t.startsWith('Query history')) : ''
+    };
+  });
+  check('tag chip filters the history', tagFiltered.rows === 1 && tagFiltered.rows < rowsBefore, `rows ${rowsBefore} → ${tagFiltered.rows}, ${tagFiltered.summary}`);
+  check('summary shows filtered/total count', /\(\d+\/\d+\)/.test(tagFiltered.summary), tagFiltered.summary);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    Array.from(shadow.querySelectorAll('.gejq-hist-tags .gejq-chip')).find((c) => c.textContent === '#counts').click();
+  });
+  await page.waitForTimeout(200);
+  const filterInput = page.locator('.gejq-hist-filter-text');
+  await filterInput.fill('displayName');
+  await page.waitForTimeout(200);
+  const textFiltered = await page.evaluate(
+    () => document.getElementById('gejq-host').shadowRoot.querySelectorAll('.gejq-query-history .gejq-example').length
+  );
+  check('free-text filter narrows the history', textFiltered >= 1 && textFiltered < rowsBefore, `rows ${rowsBefore} → ${textFiltered}`);
+  await filterInput.fill('');
+  await page.waitForTimeout(200);
+
+  // 10i3. Suggestions section is collapsible.
+  const suggestionsCollapsible = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const details = shadow.querySelector('.gejq-suggestions-details');
+    return {
+      isDetails: details && details.tagName === 'DETAILS' && details.open,
+      summaryText: details ? details.querySelector('summary').textContent : ''
+    };
+  });
+  check(
+    'suggestions live in an open collapsible section',
+    suggestionsCollapsible.isDetails && suggestionsCollapsible.summaryText === 'Suggested for this response',
+    JSON.stringify(suggestionsCollapsible)
+  );
 
   // 10j. The split between response view and panel is draggable.
   const hostWidthBefore = await page.evaluate(() => document.getElementById('gejq-host').getBoundingClientRect().width);
@@ -652,22 +742,24 @@ function check(name, ok, extra) {
   const bgState = await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     return {
-      options: shadow.querySelectorAll('.gejq-history-select option').length,
-      toggleVisible: shadow.querySelector('.gejq-bg-toggle').style.display !== 'none',
-      toggleText: shadow.querySelector('.gejq-bg-toggle').textContent
+      options: shadow.querySelectorAll('.gejq-history-select option').length
     };
   });
   check('background request hidden from the response list', bgState.options === optionCountBefore, `options ${optionCountBefore} → ${bgState.options}`);
-  check('background toggle shows hidden count', bgState.toggleVisible && bgState.toggleText.includes('1'), bgState.toggleText);
-  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-bg-toggle').click());
-  await page.waitForTimeout(300);
+  await popup.check('#setting-show-background');
+  await page.waitForTimeout(500);
   const shownBg = await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     return Array.from(shadow.querySelectorAll('.gejq-history-select option')).map((o) => o.textContent);
   });
-  check('toggle reveals background entry with ⚙ marker', shownBg.some((t) => t.includes('⚙') && t.includes('/v1.0/organization')), shownBg.find((t) => t.includes('⚙')));
-  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-bg-toggle').click());
-  await page.waitForTimeout(300);
+  check('settings toggle reveals background entry with ⚙ marker', shownBg.some((t) => t.includes('⚙') && t.includes('/v1.0/organization')), shownBg.find((t) => t.includes('⚙')));
+  await popup.uncheck('#setting-show-background');
+  await page.waitForTimeout(500);
+  const hiddenAgain = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-history-select option')).every((o) => !o.textContent.includes('⚙'));
+  });
+  check('unchecking the setting hides background entries again', hiddenAgain);
 
   // A deliberate run of a "background-looking" URL (via the Run button)
   // stays visible: URI field matches + recent run interaction.

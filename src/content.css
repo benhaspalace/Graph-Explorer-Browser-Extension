@@ -215,33 +215,29 @@
 .gejq-history-row {
   display: flex;
   gap: 6px;
-  align-items: stretch;
+  align-items: center;
   padding: 8px 12px 0;
 }
 
-.gejq-bg-toggle {
-  flex: 0 0 auto;
-  padding: 0 8px;
-  border: 1px solid var(--gejq-border);
-  border-radius: 4px;
-  background: var(--gejq-bg);
-  color: var(--gejq-text-subtle);
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.gejq-bg-toggle.gejq-seg-active {
-  background: var(--gejq-accent);
-  border-color: var(--gejq-accent);
-  color: #ffffff;
-}
-
-.gejq-history-select {
+/* Selected response as selectable text (full URL + timestamp + status). */
+.gejq-response-text {
   flex: 1;
   min-width: 0;
-  width: 100%;
-  padding: 6px 8px;
+  padding: 5px 6px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg-subtle);
+  color: var(--gejq-text);
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 11px;
+}
+
+/* Compact picker: just the arrow; the option list opens full-width. */
+.gejq-history-select {
+  flex: 0 0 34px;
+  width: 34px;
+  align-self: stretch;
+  padding: 0 2px;
   border: 1px solid var(--gejq-border);
   border-radius: 4px;
   background: var(--gejq-bg);
@@ -251,22 +247,6 @@
 }
 
 /* ---------------------------------------------------------- response info */
-
-.gejq-response-info {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 4px 12px 0;
-  font-size: 11px;
-  color: var(--gejq-text-subtle);
-}
-
-.gejq-response-url {
-  font-family: Consolas, "Cascadia Code", Menlo, monospace;
-  word-break: break-all;
-  user-select: text;
-  cursor: text;
-}
 
 .gejq-live-badge {
   flex: 0 0 auto;
@@ -508,8 +488,51 @@
 
 /* ------------------------------------------------------------ suggestions */
 
+.gejq-suggestions-details {
+  margin: 8px 12px 0;
+}
+
 .gejq-suggestions {
-  padding: 8px 12px 0;
+  padding: 6px 0 0;
+}
+
+/* --------------------------------------------------------- history filter */
+
+.gejq-hist-filter {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.gejq-hist-filter-text {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  font-size: 12px;
+}
+
+.gejq-hist-filter-time {
+  flex: 0 0 auto;
+  padding: 4px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  font-size: 12px;
+}
+
+.gejq-hist-tags {
+  margin-bottom: 6px;
+}
+
+.gejq-chip.gejq-tag-active {
+  background: var(--gejq-accent);
+  border-color: var(--gejq-accent);
+  color: #ffffff;
 }
 
 .gejq-help-heading {

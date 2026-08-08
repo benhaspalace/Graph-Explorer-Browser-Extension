@@ -23,10 +23,11 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   indexes, slices, simple filters, counts) between the languages; queries
   outside that subset are left untouched with the error line and refreshed
   suggestions to guide you.
-- **Live indicator** — the panel shows the full (selectable) request line of
-  the response being queried, with a ● live badge while it follows the latest
-  response (re-running your query automatically on every new Graph query) or
-  a "pinned" badge when you've selected an older response.
+- **Live indicator** — one compact row shows the response being queried as
+  selectable text (timestamp · method · full URL · status) with an inline
+  ● live badge while it follows the latest response (re-running your query
+  automatically on every new Graph query) or a "pinned" badge when you've
+  selected an older response from the dropdown next to it.
 - **Advanced Graph queries by default** — when the URI field holds a GET
   query using `$filter`, `$search`, or `$orderby`, the extension visibly adds
   `$count=true` to the URI field and `ConsistencyLevel: eventual` +
@@ -36,17 +37,19 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   require. Body-carrying methods (POST/PUT/PATCH) get the Content-Type row
   too. Everything happens in the query view itself; requests are never
   modified behind the scenes. On by default; toggle it in the settings.
-- **Query completion** — typing in the query box suggests the language's
-  functions and operators (all 26 JMESPath functions, the jq builtins the
-  bundled engine supports, JSONPath syntax snippets) in a dropdown:
-  ↑/↓ to choose, Enter/Tab to accept, Esc to dismiss. Suggestions never
-  appear inside string literals.
+- **Query completion** — typing in the query box opens a completion
+  dropdown: property names resolved from the selected response at the path
+  before the cursor (`value[].` → `displayName`, `mail`, … with type hints)
+  ranked first, followed by the language's functions and operators (all 26
+  JMESPath functions, the jq builtins the bundled engine supports, JSONPath
+  syntax snippets). ↑/↓ to choose, Enter/Tab to accept, Esc to dismiss.
+  Suggestions never appear inside string literals.
 - **Background-request filtering** — Graph Explorer's own calls (signed-in
   user, organization, permission grants) are kept out of the response list.
   Classification combines known-internal URL patterns, a match against the
   query in the URI field, and whether you actually ran a query — so a
-  deliberate `GET /me` stays visible. A ⚙ counter next to the response list
-  reveals the hidden entries when you need them.
+  deliberate `GET /me` stays visible. A setting reveals the hidden entries
+  (marked ⚙) when you need them.
 - **Automatic sign-in** — opening Graph Explorer while signed out clicks the
   profile view for you to start the sign-in flow (on by default; your browser
   may ask you to allow the sign-in popup).
@@ -66,9 +69,11 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   and URL: in place when the method already matches, otherwise via Graph
   Explorer's own share-link format (`?request=…&method=…&version=…`), the same
   mechanism its built-in history uses.
-- **Favorites and tags** — star ★ a saved query to pin it (favorites are
-  grouped on top and never trimmed by the history limit), and tag 🏷 queries
-  with your own labels to group them below the favorites.
+- **Favorites, tags, and filtering** — star ★ a saved query to pin it
+  (favorites sit on top and are never trimmed by the history limit), tag 🏷
+  queries with your own labels, and filter the expanded history by free
+  text, time window (last hour → last 30 days), and tag chips (multiple
+  tags combine as AND).
 - **Smart suggestions** — one-click query chips generated from the shape of
   the current response in the selected language, plus a built-in cheat sheet.
 - **Export as JSON or CSV** — a format switch in the footer controls the
@@ -127,6 +132,7 @@ Click the toolbar icon to open the settings popup:
 | Auto sign-in | on | Starts the sign-in flow when you open Graph Explorer signed out |
 | Auto-fetch all pages | off | Follows `@odata.nextLink` and adds the combined dataset to the response list |
 | Auto-fetch limits | 50 pages / 10 MB | Stops the chain at these limits; the panel warns when a dataset was cut off |
+| Show background requests | off | Reveal Graph Explorer's own requests in the response list (marked ⚙) |
 | Query history limit | 50 | How many distinct queries to keep (checkbox for unlimited) |
 
 ### Query examples (JMESPath)
