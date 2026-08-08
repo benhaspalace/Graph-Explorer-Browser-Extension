@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Graph Explorer JSON Query</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <span class="icon">{;}</span>
+    <h1>Graph Explorer JSON Query</h1>
+  </header>
+
+  <ol>
+    <li>Open <strong>Graph Explorer</strong> and run any query.</li>
+    <li>The results area splits in half — the <strong>JSON Query</strong> panel appears on the right (use the button in the bottom-right corner to show it again if hidden).</li>
+    <li>Type a <strong>JMESPath</strong> expression (like Azure CLI <code>--query</code>) in the top box; the filtered result appears below it.</li>
+    <li>Copy or download the result as JSON or CSV.</li>
+  </ol>
+
+  <p class="example">Example: <code>value[].{name: displayName, email: mail}</code></p>
+
+  <section class="settings">
+    <h2>Settings</h2>
+    <label>
+      <span class="field-label">Query language</span>
+      <select id="setting-language">
+        <option value="jmespath">JMESPath</option>
+        <option value="jsonpath">JSONPath</option>
+      </select>
+    </label>
+    <label>
+      <input type="checkbox" id="setting-advanced-query" />
+      <span>Advanced queries: automatically add <code>ConsistencyLevel: eventual</code> and <code>$count=true</code> to requests using <code>$filter</code>, <code>$search</code>, or <code>$orderby</code></span>
+    </label>
+    <label>
+      <input type="checkbox" id="setting-auto-sign-in" />
+      <span>Sign in automatically when opening Graph Explorer signed out (your browser may ask you to allow the sign-in popup)</span>
+    </label>
+    <label>
+      <input type="checkbox" id="setting-auto-fetch" />
+      <span>Auto-fetch all pages: follow <code>@odata.nextLink</code> and add the combined dataset to the response list</span>
+    </label>
+    <label class="sub">
+      <span class="field-label">Auto-fetch limits</span>
+      <input type="number" id="setting-auto-fetch-pages" min="1" max="1000" step="1" title="Maximum pages to fetch" /> <span>pages,</span>
+      <input type="number" id="setting-auto-fetch-mb" min="1" max="50" step="1" title="Maximum total size in MB" /> <span>MB</span>
+    </label>
+    <label>
+      <span class="field-label">Query history limit</span>
+      <input type="number" id="setting-history-limit" min="1" max="10000" step="1" />
+      <label class="inline">
+        <input type="checkbox" id="setting-history-unlimited" />
+        <span>unlimited</span>
+      </label>
+    </label>
+  </section>
+
+  <a id="open-explorer" class="button" href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="_blank" rel="noreferrer noopener">Open Graph Explorer</a>
+
+  <footer>
+    <a href="https://jmespath.org/tutorial.html" target="_blank" rel="noreferrer noopener">JMESPath tutorial</a>
+    <span id="version"></span>
+  </footer>
+
+  <script src="../src/query-utils.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
