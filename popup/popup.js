@@ -46,10 +46,10 @@ function validLanguage(value) {
 
 function render(settings) {
   languageSelect.value = validLanguage(settings.queryLanguage);
-  // advancedQuery and autoSignIn default to on; autoFetchNextLink to off.
+  // advancedQuery, autoSignIn, and autoFetchNextLink all default to on.
   advancedQueryBox.checked = settings.advancedQuery !== false;
   autoSignInBox.checked = settings.autoSignIn !== false;
-  autoFetchBox.checked = settings.autoFetchNextLink === true;
+  autoFetchBox.checked = settings.autoFetchNextLink !== false;
   autoFetchPagesInput.value = String(GEJQ.clampInt(settings.autoFetchMaxPages, 1, 1000, 50));
   autoFetchMbInput.value = String(GEJQ.clampInt(settings.autoFetchMaxMb, 1, 50, 10));
   showBackgroundBox.checked = settings.showBackgroundRequests === true;
