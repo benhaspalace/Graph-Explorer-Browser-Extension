@@ -24,6 +24,14 @@
   --gejq-json-string: #0451a5;
   --gejq-json-number: #098658;
   --gejq-json-literal: #0000ff;
+  /* Query-editor tokens (mirror the JSON palette above). */
+  --gejq-tok-string: #0451a5;
+  --gejq-tok-number: #098658;
+  --gejq-tok-keyword: #795e26;
+  --gejq-tok-operator: #616161;
+  --gejq-tok-variable: #001080;
+  --gejq-tok-property: #a31515;
+  --gejq-tok-bracket-match: rgba(0, 120, 212, 0.15);
   --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
 }
 
@@ -45,6 +53,13 @@
     --gejq-json-string: #ce9178;
     --gejq-json-number: #b5cea8;
     --gejq-json-literal: #569cd6;
+    --gejq-tok-string: #ce9178;
+    --gejq-tok-number: #b5cea8;
+    --gejq-tok-keyword: #dcdcaa;
+    --gejq-tok-operator: #adadad;
+    --gejq-tok-variable: #4fc1ff;
+    --gejq-tok-property: #9cdcfe;
+    --gejq-tok-bracket-match: rgba(97, 175, 239, 0.3);
     --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
   }
 }
@@ -64,6 +79,13 @@
   --gejq-json-string: #ce9178;
   --gejq-json-number: #b5cea8;
   --gejq-json-literal: #569cd6;
+  --gejq-tok-string: #ce9178;
+  --gejq-tok-number: #b5cea8;
+  --gejq-tok-keyword: #dcdcaa;
+  --gejq-tok-operator: #adadad;
+  --gejq-tok-variable: #4fc1ff;
+  --gejq-tok-property: #9cdcfe;
+  --gejq-tok-bracket-match: rgba(97, 175, 239, 0.3);
   --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
 }
 
@@ -385,6 +407,55 @@
 .gejq-query-input:focus {
   outline: 2px solid var(--gejq-accent);
   outline-offset: -1px;
+}
+
+/* CodeMirror query editor — the container carries .gejq-query-input so the
+   border/height/resize rules above apply; CodeMirror's own injected styles
+   are overridden with !important where they contest ours. */
+.gejq-query-editor {
+  padding: 0;
+  overflow: hidden; /* keeps CodeMirror inside; also enables the resize handle */
+}
+
+.gejq-query-editor .cm-editor {
+  height: 100%;
+  background: transparent;
+}
+
+.gejq-query-editor .cm-editor.cm-focused {
+  outline: none !important;
+}
+
+.gejq-query-editor:focus-within {
+  outline: 2px solid var(--gejq-accent);
+  outline-offset: -1px;
+}
+
+.gejq-query-editor .cm-scroller {
+  font-family: Consolas, "Cascadia Code", Menlo, monospace !important;
+  font-size: 13px !important;
+}
+
+.gejq-query-editor .cm-content {
+  padding: 5px 0 !important;
+  caret-color: var(--gejq-text);
+}
+
+.gejq-query-editor .cm-line {
+  padding: 0 8px !important;
+}
+
+.gejq-query-editor .cm-placeholder {
+  color: var(--gejq-text-subtle) !important;
+}
+
+.gejq-query-editor .cm-matchingBracket {
+  background: var(--gejq-tok-bracket-match) !important;
+  outline: 1px solid var(--gejq-accent);
+}
+
+.gejq-query-editor .cm-nonmatchingBracket {
+  color: var(--gejq-error) !important;
 }
 
 .gejq-error {

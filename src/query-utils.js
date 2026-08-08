@@ -387,6 +387,122 @@
     ]
   };
 
+  // ------------------------------------------------------ query tokenizer
+
+  var TOKEN_FUNCTION_NAMES = null;
+
+  /** Per-language set of names that read as functions/builtins, derived
+   *  from QUERY_COMPLETIONS so highlighting always matches completion. */
+  function tokenFunctionNames(language) {
+    if (!TOKEN_FUNCTION_NAMES) {
+      TOKEN_FUNCTION_NAMES = {};
+      Object.keys(QUERY_COMPLETIONS).forEach(function (key) {
+        var names = {};
+        QUERY_COMPLETIONS[key].forEach(function (item) {
+          var match = /^([A-Za-z_][A-Za-z0-9_]*)\(?$/.exec(item.label);
+          if (match) {
+            names[match[1]] = true;
+          }
+        });
+        TOKEN_FUNCTION_NAMES[key] = names;
+      });
+    }
+    return TOKEN_FUNCTION_NAMES[language] || {};
+  }
+
+  var JQ_RESERVED = ['if', 'then', 'elif', 'else', 'end', 'as', 'def', 'reduce', 'foreach', 'try', 'catch', 'label', 'import', 'include', 'and', 'or', 'not'];
+
+  var TOKEN_BRACKETS = '()[]{}';
+  var TOKEN_OPERATORS = '|&=!<>+-*/%?:.,;~';
+
+  /**
+   * Scan one token of a query string starting at `pos`. Returns
+   * { end, type } where type is a CodeMirror-style token name ('string',
+   * 'number', 'keyword' for functions/builtins, 'operator', 'bracket',
+   * 'variableName' for @/$… references, 'propertyName') or null for
+   * whitespace/plain text. `end` always advances past `pos` while there
+   * is input left. Powers the query editor's syntax highlighting.
+   */
+  function nextQueryToken(language, text, pos) {
+    var ch = text[pos];
+    if (ch === undefined) {
+      return { end: pos, type: null };
+    }
+    var end;
+    if (/\s/.test(ch)) {
+      end = pos + 1;
+      while (end < text.length && /\s/.test(text[end])) {
+        end++;
+      }
+      return { end: end, type: null };
+    }
+    // '…' and "…" strings everywhere; `…` JSON literals in JMESPath.
+    if (ch === "'" || ch === '"' || (ch === '`' && language === 'jmespath')) {
+      end = pos + 1;
+      while (end < text.length) {
+        if (text[end] === '\\') {
+          end += 2;
+          continue;
+        }
+        if (text[end] === ch) {
+          end++;
+          break;
+        }
+        end++;
+      }
+      return { end: Math.min(end, text.length), type: 'string' };
+    }
+    if (/[0-9]/.test(ch)) {
+      end = pos + 1;
+      while (end < text.length && /[0-9]/.test(text[end])) {
+        end++;
+      }
+      if (text[end] === '.' && /[0-9]/.test(text[end + 1] || '')) {
+        end += 2;
+        while (end < text.length && /[0-9]/.test(text[end])) {
+          end++;
+        }
+      }
+      return { end: end, type: 'number' };
+    }
+    // $root/$vars (JSONPath, jq), @item (JMESPath, JSONPath), @base64 (jq).
+    if (ch === '$' || ch === '@') {
+      end = pos + 1;
+      while (end < text.length && /[A-Za-z0-9_]/.test(text[end])) {
+        end++;
+      }
+      return { end: end, type: 'variableName' };
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      end = pos + 1;
+      while (end < text.length && /[A-Za-z0-9_]/.test(text[end])) {
+        end++;
+      }
+      var name = text.slice(pos, end);
+      var afterDot = text[pos - 1] === '.'; // `.keys` is a property access, not the builtin
+      if (!afterDot) {
+        if (language === 'jq' && JQ_RESERVED.indexOf(name) !== -1) {
+          return { end: end, type: 'keyword' };
+        }
+        if (tokenFunctionNames(language)[name] === true) {
+          // jq builtins also appear bare (`.value | keys`); the other
+          // languages only call functions with parentheses.
+          if (language === 'jq' || /^\s*\(/.test(text.slice(end))) {
+            return { end: end, type: 'keyword' };
+          }
+        }
+      }
+      return { end: end, type: 'propertyName' };
+    }
+    if (TOKEN_BRACKETS.indexOf(ch) !== -1) {
+      return { end: pos + 1, type: 'bracket' };
+    }
+    if (TOKEN_OPERATORS.indexOf(ch) !== -1) {
+      return { end: pos + 1, type: 'operator' };
+    }
+    return { end: pos + 1, type: null };
+  }
+
   function insideStringLiteral(text) {
     var quote = null;
     for (var i = 0; i < text.length; i++) {
@@ -1904,6 +2020,7 @@
     summarizeUrl: summarizeUrl,
     trimHistory: trimHistory,
     suggestQueries: suggestQueries,
+    nextQueryToken: nextQueryToken,
     toCsv: toCsv
   };
 });

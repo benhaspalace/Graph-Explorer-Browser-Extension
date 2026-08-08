@@ -284,12 +284,30 @@ function check(name, ok, extra) {
   }, { timeout: 10000 });
   check('graph response captured into history', true);
 
-  // 3. Type a JMESPath query, verify the live result.
-  const query = page.locator('.gejq-query-input');
+  // 3. Type a JMESPath query, verify the live result. The editor is
+  // CodeMirror: type into its contenteditable, read back via the
+  // container's input-like .value getter.
+  const query = page.locator('.gejq-query-input .cm-content');
+  const queryValue = () =>
+    page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input').dataset.query);
+  check(
+    'CodeMirror editor mounted',
+    await page.evaluate(() => !!document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-editor .cm-editor'))
+  );
   await query.fill('value[].{name: displayName, email: mail}');
   await page.waitForTimeout(400);
   const resultText = await page.locator('.gejq-result').innerText();
   check('reshape query returns expected data', resultText.includes('adele@contoso.com') && resultText.includes('"name"'));
+  check('editor mirrors its value to data-query', (await queryValue()) === 'value[].{name: displayName, email: mail}');
+  const editorDecorations = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      highlightSpans: shadow.querySelectorAll('.gejq-query-editor .cm-line span[class]').length,
+      matchingBrackets: shadow.querySelectorAll('.gejq-query-editor .cm-matchingBracket').length
+    };
+  });
+  check('query editor highlights tokens', editorDecorations.highlightSpans > 0, JSON.stringify(editorDecorations));
+  check('bracket matching active at the caret', editorDecorations.matchingBrackets >= 1, JSON.stringify(editorDecorations));
 
   await query.fill("value[?jobTitle == 'Auditor'].displayName");
   await page.waitForTimeout(400);
@@ -558,7 +576,7 @@ function check(name, ok, extra) {
   await page.waitForTimeout(300);
   await page.locator('.gejq-lang-select').selectOption('jmespath');
   await page.waitForTimeout(400);
-  check('language switch converts the query', (await query.inputValue()) === 'value[].displayName', await query.inputValue());
+  check('language switch converts the query', (await queryValue()) === 'value[].displayName', await queryValue());
   check('converted query runs without error', (await page.locator('.gejq-panel .gejq-error').first().innerText()).trim() === '');
   check('converted query returns data', (await page.locator('.gejq-result').innerText()).includes('Nestor Wilke'));
 
@@ -570,7 +588,7 @@ function check(name, ok, extra) {
   await page.waitForTimeout(300);
   await page.locator('.gejq-lang-select').selectOption('jmespath');
   await page.waitForTimeout(400);
-  check('unconvertible query left untouched', (await query.inputValue()) === '$..displayName');
+  check('unconvertible query left untouched', (await queryValue()) === '$..displayName');
   check('error shown for incompatible query', (await page.locator('.gejq-panel .gejq-error').first().innerText()).trim() !== '');
   const chipTexts = await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
@@ -600,7 +618,7 @@ function check(name, ok, extra) {
   check('property completion offers response keys', !!propItems && propItems.includes('mail'), (propItems || []).join(' | '));
   await query.press('Enter');
   await page.waitForTimeout(200);
-  check('accepting property completion builds the path', (await query.inputValue()) === '.value[].mail', await query.inputValue());
+  check('accepting property completion builds the path', (await queryValue()) === '.value[].mail', await queryValue());
 
   // Tier-1 autocomplete: language builtins.
   await query.fill('.value | uniq');
@@ -616,7 +634,7 @@ function check(name, ok, extra) {
   await query.press('ArrowDown');
   await query.press('Enter');
   await page.waitForTimeout(200);
-  check('ArrowDown+Enter accepts the highlighted completion', (await query.inputValue()) === '.value | unique', await query.inputValue());
+  check('ArrowDown+Enter accepts the highlighted completion', (await queryValue()) === '.value | unique', await queryValue());
   check(
     'dropdown closes after accepting',
     await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autocomplete').style.display === 'none')
@@ -853,7 +871,7 @@ function check(name, ok, extra) {
     Array.from(shadow.querySelectorAll('.gejq-tree-key')).find((k) => k.textContent === 'displayName').click();
   });
   await page.waitForTimeout(400);
-  check('tree click composes the path query', (await query.inputValue()) === '.value | .[].displayName', await query.inputValue());
+  check('tree click composes the path query', (await queryValue()) === '.value | .[].displayName', await queryValue());
   await page.locator('.gejq-seg-btn', { hasText: 'JSON' }).click();
   await page.waitForTimeout(300);
   check('tree-built query returns the data', (await page.locator('.gejq-result').innerText()).includes('Adele Vance'));
@@ -888,7 +906,7 @@ function check(name, ok, extra) {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     return {
       firstOption: shadow.querySelector('.gejq-history-select option').textContent,
-      query: shadow.querySelector('.gejq-query-input').value,
+      query: shadow.querySelector('.gejq-query-input').dataset.query,
       result: shadow.querySelector('.gejq-result').textContent
     };
   });

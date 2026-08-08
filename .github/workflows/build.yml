@@ -68,3 +68,46 @@ jobs:
           name: graph-explorer-json-query-v${{ steps.meta.outputs.version }}
           path: dist/graph-explorer-json-query
           if-no-files-found: error
+
+  # Every version bump that lands on main becomes a GitHub Release
+  # (tag v<version>) with the ready-to-load zip attached. Re-runs on the
+  # same version are no-ops, so pushes without a bump publish nothing.
+  release:
+    name: Publish release
+    needs: [e2e, package]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version
+        id: meta
+        run: echo "version=$(node -p "require('./manifest.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Check whether this version is already released
+        id: released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.meta.outputs.version }}" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Package extension zip
+        if: steps.released.outputs.exists == 'false'
+        run: |
+          mkdir -p dist/graph-explorer-json-query
+          cp -r manifest.json icons popup src vendor LICENSE dist/graph-explorer-json-query/
+          (cd dist && zip -qr "graph-explorer-json-query-v${{ steps.meta.outputs.version }}.zip" graph-explorer-json-query)
+      - name: Create release
+        if: steps.released.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.meta.outputs.version }}" \
+            "dist/graph-explorer-json-query-v${{ steps.meta.outputs.version }}.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "v${{ steps.meta.outputs.version }}" \
+            --generate-notes \
+            --notes "Unzip the attached file and use **Load unpacked** on the inner folder — see the [README](https://github.com/$GITHUB_REPOSITORY#installation-load-unpacked) for step-by-step instructions."

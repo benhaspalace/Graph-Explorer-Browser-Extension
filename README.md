@@ -36,6 +36,12 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   pieces [Microsoft Graph advanced queries](https://learn.microsoft.com/graph/aad-advanced-queries)
   require. Everything happens in the query view itself; requests are never
   modified behind the scenes. On by default; toggle it in the settings.
+- **A real code editor** — the query box is a CodeMirror 6 editor with
+  syntax highlighting for all three languages (strings, numbers,
+  functions, `@`/`$` references, properties), matching-bracket
+  highlighting, auto-closing brackets and quotes, and undo/redo history.
+  Enter runs and saves the query; Shift+Enter inserts a line break; drag
+  the bottom edge to grow the box.
 - **Query completion** — typing in the query box opens a completion
   dropdown: property names resolved from the selected response at the path
   before the cursor (`value[].` → `displayName`, `mail`, … with type hints)
@@ -122,16 +128,21 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
 
 The extension is plain JavaScript — no build step.
 
-**Option A — download a build artifact (recommended):**
+**Option A — download a release (recommended):**
 
-1. Open the repository's **Actions** tab, pick the latest green **Build** run
-   on `main`, and download the `graph-explorer-json-query-v…` artifact.
+1. Open the repository's **Releases** page and download the
+   `graph-explorer-json-query-v….zip` asset of the latest release.
 2. Unzip it somewhere permanent.
 3. **Chrome:** open `chrome://extensions` · **Edge:** open `edge://extensions`.
 4. Enable **Developer mode** (Chrome: toggle top-right; Edge: toggle in the left sidebar).
 5. Click **Load unpacked** and select the unzipped folder (the one containing `manifest.json`).
 
-**Option B — from a clone:** same steps, but select the repository folder
+**Option B — download a build artifact:** same steps, but grab the
+`graph-explorer-json-query-v…` artifact from the latest green **Build**
+run on `main` in the **Actions** tab (this also works for unreleased
+in-between builds).
+
+**Option C — from a clone:** same steps, but select the repository folder
 itself as the unpacked extension.
 
 Then open [Graph Explorer](https://developer.microsoft.com/en-us/graph/graph-explorer)
@@ -195,6 +206,11 @@ See the [JMESPath tutorial](https://jmespath.org/tutorial.html) and the
   ([jsonpath-plus](https://github.com/JSONPath-Plus/JSONPath) 10.3.0, MIT),
   and `vendor/jqts.js` ([jqts](https://github.com/kentdotn/jqts) 0.0.8, MIT —
   a pure-JS jq clone covering core jq; no WASM needed) evaluate the queries.
+- `vendor/codemirror.js` is a bundled [CodeMirror 6](https://codemirror.net)
+  (MIT) that powers the query editor; the tokenizers for the three query
+  languages are the extension's own (`nextQueryToken` in
+  `src/query-utils.js`). If the bundle ever fails to load, the panel falls
+  back to a plain textarea with identical behavior.
 
 ### Privacy
 
@@ -228,7 +244,10 @@ interception, so it needs no network. Install Playwright first:
 `npm i -D playwright && npx playwright install chromium`.
 
 CI (`.github/workflows/build.yml`) runs both suites on every push and PR
-to `main` and uploads a ready-to-load extension artifact.
+to `main` and uploads a ready-to-load extension artifact. When a push to
+`main` carries a new `manifest.json` version, the pipeline also publishes
+a GitHub Release tagged `v<version>` with the zip attached; pushes
+without a version bump publish nothing.
 
 **Note on non-English locales:** in-place editor population and auto
 sign-in locate Graph Explorer controls primarily by their English
@@ -248,6 +267,7 @@ src/background.js      Service worker (Alt+G / Alt+Q commands)
 vendor/jmespath.js     Vendored JMESPath engine (MIT)
 vendor/jsonpath-plus.js Vendored JSONPath engine (MIT)
 vendor/jqts.js         Vendored jq engine (jqts, MIT)
+vendor/codemirror.js   Vendored CodeMirror 6 bundle (MIT)
 popup/                 Toolbar popup: instructions + settings
 scripts/make-icons.js  Icon generator (no dependencies)
 test/                  Unit tests (`node --test`)

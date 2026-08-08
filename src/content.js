@@ -807,7 +807,8 @@
     var language = LANGUAGES[state.settings.queryLanguage];
     closeAutocomplete();
     ui.titleLabel.textContent = 'JSON Query (' + language.label + ')';
-    ui.queryInput.placeholder = language.placeholder;
+    ui.queryEditor.setPlaceholder(language.placeholder);
+    ui.queryEditor.setLanguage(state.settings.queryLanguage);
     if (ui.languageSelect.value !== state.settings.queryLanguage) {
       ui.languageSelect.value = state.settings.queryLanguage;
     }
@@ -829,7 +830,7 @@
     var converted = GEJQ.convertQuery(query, fromLanguage, toLanguage);
     if (converted.ok && converted.query !== query) {
       state.query = converted.query;
-      ui.queryInput.value = converted.query;
+      ui.queryEditor.setValue(converted.query);
       storageSet(STORAGE_KEY_QUERY, converted.query);
     }
   }
@@ -1068,11 +1069,11 @@
 
   function setQuery(query) {
     state.query = query;
-    ui.queryInput.value = query;
+    ui.queryEditor.setValue(query);
     storageSet(STORAGE_KEY_QUERY, query);
     runQuery();
     recordQuery();
-    ui.queryInput.focus();
+    ui.queryEditor.focus();
   }
 
   // ------------------------------------------------ populate Graph Explorer
@@ -1153,16 +1154,16 @@
 
   /** Refresh the completion dropdown from the text before the cursor. */
   function updateAutocomplete() {
-    var input = ui.queryInput;
-    var caret = input.selectionStart;
-    if (caret === null || caret !== input.selectionEnd) {
+    var editor = ui.queryEditor;
+    var caret = editor.getCaret();
+    if (caret === null) {
       closeAutocomplete();
       return;
     }
     var response = selectedResponse();
     var result = GEJQ.queryCompletions(
       state.settings.queryLanguage,
-      input.value.slice(0, caret),
+      editor.getValue().slice(0, caret),
       response && !response.tooLarge ? response.json : undefined
     );
     if (!result) {
@@ -1204,18 +1205,18 @@
   }
 
   function acceptCompletion(item) {
-    var input = ui.queryInput;
-    var caret = input.selectionStart;
-    var before = input.value.slice(0, autocomplete.result.replaceFrom);
-    var after = input.value.slice(caret);
-    input.value = before + item.insert + after;
-    var newCaret = before.length + item.insert.length;
-    input.setSelectionRange(newCaret, newCaret);
-    state.query = input.value;
-    storageSet(STORAGE_KEY_QUERY, input.value);
+    var editor = ui.queryEditor;
+    var caret = editor.getCaret();
+    if (caret === null) {
+      closeAutocomplete();
+      return;
+    }
+    editor.replaceRange(autocomplete.result.replaceFrom, caret, item.insert);
+    state.query = editor.getValue();
+    storageSet(STORAGE_KEY_QUERY, state.query);
     closeAutocomplete();
     scheduleRun();
-    input.focus();
+    editor.focus();
   }
 
   // ------------------------------------------------ advanced query assist
@@ -2076,7 +2077,7 @@
     storageSet(STORAGE_KEY_COLLAPSED, false);
     applyVisibility();
     runQuery();
-    ui.queryInput.focus();
+    ui.queryEditor.focus();
   }
 
   function closePanel() {
@@ -2084,6 +2085,200 @@
     state.collapsedPref = true;
     storageSet(STORAGE_KEY_COLLAPSED, true);
     applyVisibility();
+  }
+
+  // ----------------------------------------------------------- query editor
+
+  /**
+   * The query editor: CodeMirror 6 (syntax highlighting, bracket matching,
+   * auto-closing brackets, undo history) when the vendored bundle loaded,
+   * otherwise a plain textarea with the same behavior. The returned facade
+   * hides the difference from the rest of the panel. Programmatic setValue/
+   * replaceRange never fire the input handler — callers do their own
+   * bookkeeping, mirroring how assigning input.value works.
+   */
+  function createQueryEditor() {
+    var handlers = {
+      input: function () {
+        state.query = editor.getValue();
+        storageSet(STORAGE_KEY_QUERY, state.query);
+        scheduleRun();
+        updateAutocomplete();
+      },
+      // Recording happens only on deliberate runs (Enter or chip clicks) —
+      // a blur handler would capture half-typed queries when the focus
+      // moves to a suggestion chip.
+      keydown: function (event) {
+        if (autocomplete.open) {
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            moveAutocomplete(event.key === 'ArrowDown' ? 1 : -1);
+            return true;
+          }
+          if (event.key === 'Enter' || event.key === 'Tab') {
+            event.preventDefault();
+            acceptCompletion(autocomplete.result.items[autocomplete.activeIndex]);
+            return true;
+          }
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation(); // don't collapse the panel
+            closeAutocomplete();
+            return true;
+          }
+        }
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          runQuery();
+          recordQuery();
+          return true;
+        }
+        return false;
+      },
+      blur: function () {
+        // Delayed so a mousedown on a completion row can land first.
+        setTimeout(closeAutocomplete, 150);
+      }
+    };
+    var editor = window.GEJQCM ? codeMirrorEditor(handlers) : textareaEditor(handlers);
+    return editor;
+  }
+
+  function textareaEditor(handlers) {
+    var input = el('textarea', 'gejq-query-input');
+    input.rows = 2;
+    input.spellcheck = false; // placeholder is set by applyLanguage()
+    input.addEventListener('input', handlers.input);
+    input.addEventListener('keydown', handlers.keydown);
+    input.addEventListener('blur', handlers.blur);
+    return {
+      node: input,
+      getValue: function () {
+        return input.value;
+      },
+      setValue: function (text) {
+        input.value = text;
+      },
+      getCaret: function () {
+        return input.selectionStart !== null && input.selectionStart === input.selectionEnd ? input.selectionStart : null;
+      },
+      replaceRange: function (from, to, text) {
+        input.value = input.value.slice(0, from) + text + input.value.slice(to);
+        var caret = from + text.length;
+        input.setSelectionRange(caret, caret);
+      },
+      focus: function () {
+        input.focus();
+      },
+      setPlaceholder: function (text) {
+        input.placeholder = text;
+      },
+      setLanguage: function () {}
+    };
+  }
+
+  function codeMirrorEditor(handlers) {
+    var cm = window.GEJQCM;
+    var container = el('div', 'gejq-query-input gejq-query-editor');
+    var programmatic = false;
+    var languageCompartment = new cm.Compartment();
+    var placeholderCompartment = new cm.Compartment();
+    // Colors come from CSS variables so the editor follows the panel theme.
+    var highlightStyle = cm.HighlightStyle.define([
+      { tag: cm.tags.string, color: 'var(--gejq-tok-string)' },
+      { tag: cm.tags.number, color: 'var(--gejq-tok-number)' },
+      { tag: cm.tags.keyword, color: 'var(--gejq-tok-keyword)' },
+      { tag: cm.tags.operator, color: 'var(--gejq-tok-operator)' },
+      { tag: cm.tags.variableName, color: 'var(--gejq-tok-variable)' },
+      { tag: cm.tags.propertyName, color: 'var(--gejq-tok-property)' }
+    ]);
+    function streamLanguage(languageKey) {
+      return cm.StreamLanguage.define({
+        token: function (stream) {
+          var token = GEJQ.nextQueryToken(languageKey, stream.string, stream.pos);
+          stream.pos = token.end > stream.pos ? token.end : stream.pos + 1;
+          return token.type;
+        }
+      });
+    }
+    var view = new cm.EditorView({
+      parent: container,
+      state: cm.EditorState.create({
+        doc: '',
+        extensions: [
+          cm.history(),
+          cm.bracketMatching(),
+          cm.closeBrackets(),
+          cm.syntaxHighlighting(highlightStyle),
+          languageCompartment.of(streamLanguage(state.settings.queryLanguage)),
+          placeholderCompartment.of(cm.placeholder('')),
+          cm.EditorView.lineWrapping,
+          cm.EditorView.domEventHandlers({
+            keydown: function (event) {
+              return handlers.keydown(event) === true;
+            },
+            blur: function () {
+              handlers.blur();
+            }
+          }),
+          cm.EditorView.updateListener.of(function (update) {
+            if (update.docChanged) {
+              // DOM attributes are visible across content-script worlds
+              // (a JS `value` expando would not be) — tests and page
+              // tooling read the query from here.
+              container.dataset.query = update.state.doc.toString();
+              if (!programmatic) {
+                handlers.input();
+              }
+            }
+          }),
+          cm.keymap.of(
+            [{ key: 'Shift-Enter', run: cm.insertNewlineAndIndent }]
+              .concat(cm.closeBracketsKeymap)
+              .concat(cm.defaultKeymap)
+              .concat(cm.historyKeymap)
+          )
+        ]
+      })
+    });
+    function dispatchProgrammatic(spec) {
+      programmatic = true;
+      try {
+        view.dispatch(spec);
+      } finally {
+        programmatic = false;
+      }
+    }
+    var editor = {
+      node: container,
+      getValue: function () {
+        return view.state.doc.toString();
+      },
+      setValue: function (text) {
+        dispatchProgrammatic({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+      },
+      getCaret: function () {
+        var range = view.state.selection.main;
+        return range.empty ? range.head : null;
+      },
+      replaceRange: function (from, to, text) {
+        dispatchProgrammatic({
+          changes: { from: from, to: to, insert: text },
+          selection: { anchor: from + text.length }
+        });
+      },
+      focus: function () {
+        view.focus();
+      },
+      setPlaceholder: function (text) {
+        view.dispatch({ effects: placeholderCompartment.reconfigure(cm.placeholder(text)) });
+      },
+      setLanguage: function (languageKey) {
+        view.dispatch({ effects: languageCompartment.reconfigure(streamLanguage(languageKey)) });
+      }
+    };
+    container.dataset.query = '';
+    return editor;
   }
 
   // ------------------------------------------------------------------ panel
@@ -2255,52 +2450,10 @@
     });
     queryRow.appendChild(languageSelect);
     var queryWrap = el('div', 'gejq-query-wrap');
-    var queryInput = el('textarea', 'gejq-query-input');
-    queryInput.rows = 2;
-    queryInput.spellcheck = false; // placeholder is set by applyLanguage()
-    queryInput.addEventListener('input', function () {
-      state.query = queryInput.value;
-      storageSet(STORAGE_KEY_QUERY, queryInput.value);
-      scheduleRun();
-      updateAutocomplete();
-    });
-    // Recording happens only on deliberate runs (Enter or chip clicks) —
-    // a blur handler would capture half-typed queries when the focus
-    // moves to a suggestion chip.
-    queryInput.addEventListener('keydown', function (event) {
-      if (autocomplete.open) {
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-          event.preventDefault();
-          moveAutocomplete(event.key === 'ArrowDown' ? 1 : -1);
-          return;
-        }
-        if (event.key === 'Enter' || event.key === 'Tab') {
-          event.preventDefault();
-          acceptCompletion(autocomplete.result.items[autocomplete.activeIndex]);
-          return;
-        }
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          event.stopPropagation(); // don't collapse the panel
-          closeAutocomplete();
-          return;
-        }
-      }
-      if (event.key === 'Enter' && !event.shiftKey) {
-        event.preventDefault();
-        runQuery();
-        recordQuery();
-      }
-    });
-    queryInput.addEventListener('blur', function () {
-      // Delayed so a mousedown on a completion row can land first.
-      setTimeout(function () {
-        closeAutocomplete();
-      }, 150);
-    });
+    var queryEditor = createQueryEditor();
     var autocompleteList = el('div', 'gejq-autocomplete');
     autocompleteList.style.display = 'none';
-    queryWrap.appendChild(queryInput);
+    queryWrap.appendChild(queryEditor.node);
     queryWrap.appendChild(autocompleteList);
     queryRow.appendChild(queryWrap);
     panel.appendChild(queryRow);
@@ -2525,7 +2678,8 @@
       historySelect: historySelect,
       liveBadge: liveBadge,
       responseText: responseText,
-      queryInput: queryInput,
+      queryInput: queryEditor.node,
+      queryEditor: queryEditor,
       autocompleteList: autocompleteList,
       error: error,
       warning: warning,
@@ -2700,7 +2854,7 @@
             var savedQuery = items[STORAGE_KEY_QUERY];
             if (savedQuery && state.query === '') {
               state.query = savedQuery;
-              ui.queryInput.value = savedQuery;
+              ui.queryEditor.setValue(savedQuery);
             }
             pushSettingsToPage();
             maybeAutoSignIn();
