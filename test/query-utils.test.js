@@ -499,6 +499,102 @@ test('every jq completion compiles in the bundled jqts engine', () => {
   assert.ok(seen.size >= 30, `expected a substantial jq list, got ${seen.size}`);
 });
 
+test('toTsv produces tab-separated rows', () => {
+  assert.equal(
+    GEJQ.toTsv([{ name: 'Adele', dept: 'Sales' }, { name: 'Alex' }]),
+    'name\tdept\r\nAdele\tSales\r\nAlex\t'
+  );
+  assert.equal(GEJQ.toTsv([{ note: 'has\ttab' }]), 'note\r\n"has\ttab"');
+  assert.equal(GEJQ.toTsv('nope'), null);
+});
+
+test('sortRows sorts numbers, strings, and puts missing values last', () => {
+  const rows = [
+    { name: 'Bea', age: 30 },
+    { name: 'Al' },
+    { name: 'Cyd', age: 7 }
+  ];
+  assert.deepEqual(GEJQ.sortRows(rows, 'age', 1).map((r) => r.name), ['Cyd', 'Bea', 'Al']);
+  assert.deepEqual(GEJQ.sortRows(rows, 'age', -1).map((r) => r.name), ['Bea', 'Cyd', 'Al']);
+  assert.deepEqual(GEJQ.sortRows(rows, 'name', 1).map((r) => r.name), ['Al', 'Bea', 'Cyd']);
+  // Scalar rows: column null sorts the values themselves.
+  assert.deepEqual(GEJQ.sortRows(['b', 'a', 'c'], null, 1), ['a', 'b', 'c']);
+  // Original array untouched.
+  assert.equal(rows[0].name, 'Bea');
+});
+
+test('pathQuery emits tree-click queries in all languages', () => {
+  const segments = [{ type: 'key', name: 'value' }, { type: 'wildcard' }, { type: 'key', name: 'displayName' }];
+  assert.equal(GEJQ.pathQuery('jmespath', segments), 'value[].displayName');
+  assert.equal(GEJQ.pathQuery('jsonpath', segments), '$.value[*].displayName');
+  assert.equal(GEJQ.pathQuery('jq', segments), '.value[].displayName');
+  const odata = [{ type: 'key', name: '@odata.context' }];
+  assert.equal(GEJQ.pathQuery('jmespath', odata), '"@odata.context"');
+  assert.equal(GEJQ.pathQuery('jq', odata), '."@odata.context"');
+  assert.equal(GEJQ.pathQuery('jmespath', []), null);
+});
+
+test('diffJson reports added, removed, and changed paths', () => {
+  const before = { value: [{ id: '1', name: 'A' }, { id: '2', name: 'B' }], count: 2 };
+  const after = { value: [{ id: '1', name: 'A2' }, { id: '2', name: 'B' }, { id: '3', name: 'C' }], total: 3 };
+  const diffs = GEJQ.diffJson(before, after, 100);
+  const byPath = {};
+  diffs.forEach((d) => (byPath[d.path] = d));
+  assert.equal(byPath['value[0].name'].kind, 'changed');
+  assert.equal(byPath['value[0].name'].after, 'A2');
+  assert.equal(byPath['value[2]'].kind, 'added');
+  assert.equal(byPath['count'].kind, 'removed');
+  assert.equal(byPath['total'].kind, 'added');
+  assert.deepEqual(GEJQ.diffJson({ a: 1 }, { a: 1 }, 10), []);
+  // Bounded output.
+  const big = GEJQ.diffJson({}, Object.fromEntries(Array.from({ length: 600 }, (_, i) => ['k' + i, i])), 50);
+  assert.equal(big.length, 50);
+});
+
+test('property completion works inside filter expressions', () => {
+  const jmes = GEJQ.queryCompletions('jmespath', 'value[?job', SAMPLE_USERS_RESPONSE);
+  assert.ok(jmes && jmes.items.some((i) => i.label === 'jobTitle'), JSON.stringify(jmes));
+  const jmesEmpty = GEJQ.queryCompletions('jmespath', 'value[?', SAMPLE_USERS_RESPONSE);
+  assert.ok(jmesEmpty && jmesEmpty.items.some((i) => i.label === 'displayName'));
+  const jsonpath = GEJQ.queryCompletions('jsonpath', '$.value[?(@.ma', SAMPLE_USERS_RESPONSE);
+  assert.ok(jsonpath && jsonpath.items.some((i) => i.label === 'mail'));
+  const jq = GEJQ.queryCompletions('jq', '.value | map(select(.job', SAMPLE_USERS_RESPONSE);
+  assert.ok(jq && jq.items.some((i) => i.label === 'jobTitle'));
+  const jqPlain = GEJQ.queryCompletions('jq', '.value | select(.ma', SAMPLE_USERS_RESPONSE);
+  assert.ok(jqPlain && jqPlain.items.some((i) => i.label === 'mail'));
+});
+
+test('upsertQueryHistory keeps the favorite label across re-runs', () => {
+  let history = GEJQ.upsertQueryHistory([], { query: 'a', language: 'jmespath', lastUsed: 1, context: null }, 10);
+  history[0].label = 'My favorite';
+  history = GEJQ.upsertQueryHistory(history, { query: 'a', language: 'jmespath', lastUsed: 2, context: null }, 10);
+  assert.equal(history[0].label, 'My favorite');
+});
+
+test('sanitizeRequestHeaders drops credentials and GE telemetry', () => {
+  const sanitized = GEJQ.sanitizeRequestHeaders([
+    { name: 'Authorization', value: 'Bearer secret-token' },
+    { name: 'Cookie', value: 'session=abc' },
+    { name: 'SdkVersion', value: 'GraphExplorer/4.0' },
+    { name: 'client-request-id', value: 'guid' },
+    { name: 'ConsistencyLevel', value: 'eventual' },
+    { name: 'x-custom', value: 'demo' },
+    { name: 'Accept', value: 'application/json' }
+  ]);
+  assert.deepEqual(sanitized.map((h) => h.name), ['ConsistencyLevel', 'x-custom', 'Accept']);
+  assert.ok(!JSON.stringify(sanitized).includes('secret-token'));
+});
+
+test('sanitizeRequestHeaders strips ms-graph-dev-mode from Prefer', () => {
+  assert.deepEqual(GEJQ.sanitizeRequestHeaders([{ name: 'prefer', value: 'ms-graph-dev-mode' }]), []);
+  assert.deepEqual(
+    GEJQ.sanitizeRequestHeaders([{ name: 'Prefer', value: 'ms-graph-dev-mode, outlook.timezone="W. Europe Standard Time"' }]),
+    [{ name: 'Prefer', value: 'outlook.timezone="W. Europe Standard Time"' }]
+  );
+  assert.deepEqual(GEJQ.sanitizeRequestHeaders(null), []);
+  assert.deepEqual(GEJQ.sanitizeRequestHeaders([{ name: 5, value: 'x' }, null]), []);
+});
+
 test('isBackgroundGraphRequest flags Graph Explorer internals only', () => {
   const background = [
     'https://graph.microsoft.com/v1.0/me',

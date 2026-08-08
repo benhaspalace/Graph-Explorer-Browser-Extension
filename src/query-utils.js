@@ -486,6 +486,9 @@
       return null;
     }
     var candidate = extractPathCandidate(textBeforeCursor);
+    if (candidate === '') {
+      return null;
+    }
     var fragmentMatch = /[A-Za-z_][A-Za-z0-9_]*$/.exec(candidate);
     var fragment = fragmentMatch ? fragmentMatch[0] : '';
     var base = candidate.slice(0, candidate.length - fragment.length);
@@ -493,6 +496,14 @@
       base = base.slice(0, -1);
     } else if (base !== '') {
       return null; // not a member position (after ']', inside a filter, …)
+    }
+    if (base === '') {
+      // A bare fragment right after `[?` is a filter field, not a root
+      // path — that context is handled by filterContextCompletions.
+      var preceding = textBeforeCursor[textBeforeCursor.length - candidate.length - 1];
+      if (preceding === '?') {
+        return null;
+      }
     }
     var values;
     if (language === 'jq') {
@@ -566,6 +577,82 @@
     return resolveSegments(json, model.segments);
   }
 
+  /** Keys of the object items inside resolved values (arrays sampled). */
+  function itemKeyCompletions(values, fragment, textLength) {
+    if (!values || values.length === 0) {
+      return null;
+    }
+    var items = [];
+    var seen = {};
+    var lower = fragment.toLowerCase();
+    values.forEach(function (value) {
+      var candidates = Array.isArray(value) ? value.slice(0, 20) : [value];
+      candidates.forEach(function (item) {
+        if (items.length >= 30 || item === null || typeof item !== 'object' || Array.isArray(item)) {
+          return;
+        }
+        Object.keys(item).forEach(function (key) {
+          var keyLower = key.toLowerCase();
+          if (items.length >= 30 || seen[keyLower] || keyLower.indexOf(lower) !== 0 || keyLower === lower) {
+            return;
+          }
+          if (!PLAIN_IDENTIFIER.test(key)) {
+            return; // filter expressions need plain identifiers
+          }
+          seen[keyLower] = true;
+          items.push({ label: key, insert: key, detail: valueDetail(item[key]) });
+        });
+      });
+    });
+    if (items.length === 0) {
+      return null;
+    }
+    return { replaceFrom: textLength - fragment.length, fragment: fragment, items: items };
+  }
+
+  /**
+   * Property completion inside filter expressions: JMESPath `path[?fr`,
+   * JSONPath `path[?(@.fr`, and jq `path | select(.fr` / `map(select(.fr`.
+   * Completes with the keys of the filtered array's items.
+   */
+  function filterContextCompletions(language, textBeforeCursor, json) {
+    if (json === undefined || json === null) {
+      return null;
+    }
+    var match = null;
+    var base = null;
+    var fragment = '';
+    if (language === 'jmespath') {
+      match = /([A-Za-z_][\w."\[\]]*)\[\?\s*([A-Za-z_]\w*)?$/.exec(textBeforeCursor);
+      if (!match) {
+        return null;
+      }
+      base = match[1];
+      fragment = match[2] || '';
+      return itemKeyCompletions(resolveFromParser(parseJmesPathQuery, base, json), fragment, textBeforeCursor.length);
+    }
+    if (language === 'jsonpath') {
+      match = /(\$[\w."'\[\]*]*)\[\?\(@\.([A-Za-z_]\w*)?$/.exec(textBeforeCursor);
+      if (!match) {
+        return null;
+      }
+      base = match[1];
+      fragment = match[2] || '';
+      var values = base === '$' ? [json] : resolveFromParser(parseJsonPathQuery, base, json);
+      return itemKeyCompletions(values, fragment, textBeforeCursor.length);
+    }
+    if (language === 'jq') {
+      match = /((?:\.[\w"$\[\]]+)+)(?:\[\])?\s*\|\s*(?:map\(\s*)?(?:select\(\s*)\.([A-Za-z_]\w*)?$/.exec(textBeforeCursor);
+      if (!match) {
+        return null;
+      }
+      base = match[1];
+      fragment = match[2] || '';
+      return itemKeyCompletions(resolveFromParser(parseJqQuery, base, json), fragment, textBeforeCursor.length);
+    }
+    return null;
+  }
+
   /**
    * Query-input completion. Tier 2 (property names resolved from the
    * response JSON at the path before the cursor) ranks first, followed
@@ -577,7 +664,9 @@
     if (typeof textBeforeCursor !== 'string' || insideStringLiteral(textBeforeCursor)) {
       return null;
     }
-    var properties = propertyCompletions(language, textBeforeCursor, json);
+    var properties =
+      propertyCompletions(language, textBeforeCursor, json) ||
+      filterContextCompletions(language, textBeforeCursor, json);
 
     var functions = null;
     var entries = QUERY_COMPLETIONS[language];
@@ -1202,6 +1291,48 @@
     return extras.length === 0;
   }
 
+  // Never captured: credentials and Graph Explorer's own telemetry
+  // headers (GE re-adds those itself on every request).
+  var DROPPED_REQUEST_HEADERS = ['authorization', 'cookie', 'sdkversion', 'client-request-id'];
+
+  /**
+   * Reduce a request's headers to the ones worth remembering and
+   * restoring: credentials and Graph Explorer telemetry are dropped, and
+   * GE's always-added `ms-graph-dev-mode` preference is stripped out of
+   * the Prefer header (kept only if the user added their own tokens).
+   * Input and output are arrays of { name, value }.
+   */
+  function sanitizeRequestHeaders(pairs) {
+    var out = [];
+    (Array.isArray(pairs) ? pairs : []).forEach(function (pair) {
+      if (out.length >= 20 || !pair || typeof pair.name !== 'string' || typeof pair.value !== 'string') {
+        return;
+      }
+      var name = pair.name.trim();
+      var lower = name.toLowerCase();
+      if (DROPPED_REQUEST_HEADERS.indexOf(lower) !== -1) {
+        return;
+      }
+      var value = pair.value;
+      if (lower === 'prefer') {
+        value = value
+          .split(',')
+          .map(function (token) {
+            return token.trim();
+          })
+          .filter(function (token) {
+            return token !== '' && token !== 'ms-graph-dev-mode';
+          })
+          .join(', ');
+        if (value === '') {
+          return;
+        }
+      }
+      out.push({ name: name, value: value });
+    });
+    return out;
+  }
+
   /**
    * Decide whether a captured Graph request is one of Graph Explorer's
    * own background calls, combining three signals:
@@ -1322,7 +1453,8 @@
       uses: ((existing && existing.uses) || 0) + 1,
       context: entry.context || (existing && existing.context) || null,
       starred: !!(existing && existing.starred),
-      tags: (existing && existing.tags) || []
+      tags: (existing && existing.tags) || [],
+      label: (existing && existing.label) || ''
     });
     return trimQueryHistoryList(out, limit);
   }
@@ -1504,12 +1636,20 @@
     return csvShape(value) !== null;
   }
 
-  /**
-   * Convert a query result to CSV. Supports arrays of flat objects
-   * (nested values are JSON-encoded into the cell) and arrays of scalars.
-   * Returns null when the value has no sensible CSV representation.
-   */
-  function toCsv(value) {
+  /** Union of keys across an array of objects (column order = first seen). */
+  function csvColumns(rows) {
+    var columns = [];
+    rows.forEach(function (row) {
+      Object.keys(row).forEach(function (key) {
+        if (columns.indexOf(key) === -1) {
+          columns.push(key);
+        }
+      });
+    });
+    return columns;
+  }
+
+  function toDelimited(value, delimiter) {
     var shape = csvShape(value);
     if (shape === null) {
       return null;
@@ -1525,7 +1665,7 @@
       } else {
         text = String(cell);
       }
-      if (/[",\n\r]/.test(text)) {
+      if (text.indexOf(delimiter) !== -1 || /["\n\r]/.test(text)) {
         text = '"' + text.replace(/"/g, '""') + '"';
       }
       return text;
@@ -1533,22 +1673,15 @@
 
     var lines = [];
     if (shape === 'objects') {
-      var columns = [];
-      value.forEach(function (row) {
-        Object.keys(row).forEach(function (key) {
-          if (columns.indexOf(key) === -1) {
-            columns.push(key);
-          }
-        });
-      });
-      lines.push(columns.map(escapeCell).join(','));
+      var columns = csvColumns(value);
+      lines.push(columns.map(escapeCell).join(delimiter));
       value.forEach(function (row) {
         lines.push(
           columns
             .map(function (column) {
               return escapeCell(row[column]);
             })
-            .join(',')
+            .join(delimiter)
         );
       });
       return lines.join('\r\n');
@@ -1559,6 +1692,144 @@
       lines.push(escapeCell(row));
     });
     return lines.join('\r\n');
+  }
+
+  /**
+   * Convert a query result to CSV. Supports arrays of flat objects
+   * (nested values are JSON-encoded into the cell) and arrays of scalars.
+   * Returns null when the value has no sensible CSV representation.
+   */
+  function toCsv(value) {
+    return toDelimited(value, ',');
+  }
+
+  /** Tab-separated variant — pastes straight into Excel as a grid. */
+  function toTsv(value) {
+    return toDelimited(value, '\t');
+  }
+
+  /**
+   * Sort table rows by a column: numbers numerically, everything else as
+   * localeCompared strings; null/undefined/missing last. `direction` is
+   * 1 (ascending) or -1. For arrays of scalars use column null. Returns
+   * a new array; input order is kept for equal keys (stable).
+   */
+  function sortRows(rows, column, direction) {
+    if (!Array.isArray(rows)) {
+      return rows;
+    }
+    var dir = direction === -1 ? -1 : 1;
+    var decorated = rows.map(function (row, index) {
+      var cell = column === null || column === undefined ? row : row && typeof row === 'object' ? row[column] : undefined;
+      return { row: row, index: index, cell: cell };
+    });
+    decorated.sort(function (a, b) {
+      var av = a.cell;
+      var bv = b.cell;
+      var aMissing = av === null || av === undefined;
+      var bMissing = bv === null || bv === undefined;
+      if (aMissing && bMissing) {
+        return a.index - b.index;
+      }
+      if (aMissing) {
+        return 1; // missing values last, regardless of direction
+      }
+      if (bMissing) {
+        return -1;
+      }
+      var result;
+      if (typeof av === 'number' && typeof bv === 'number') {
+        result = av - bv;
+      } else if (typeof av === 'boolean' && typeof bv === 'boolean') {
+        result = av === bv ? 0 : av ? 1 : -1;
+      } else {
+        var as = typeof av === 'object' ? JSON.stringify(av) : String(av);
+        var bs = typeof bv === 'object' ? JSON.stringify(bv) : String(bv);
+        result = as.localeCompare(bs);
+      }
+      return result === 0 ? a.index - b.index : result * dir;
+    });
+    return decorated.map(function (entry) {
+      return entry.row;
+    });
+  }
+
+  /**
+   * Build a query in the given language from tree path segments
+   * ({type:'key'|'index'|'wildcard'} — the shared converter model).
+   * Returns null when the language can't express the path.
+   */
+  function pathQuery(language, segments) {
+    var emit = QUERY_EMITTERS[language];
+    if (!emit || !Array.isArray(segments) || segments.length === 0) {
+      return null;
+    }
+    return emit({ count: false, segments: segments });
+  }
+
+  /**
+   * Structural JSON diff. Returns up to `limit` entries of
+   * { path, kind: 'added'|'removed'|'changed', before, after }, where
+   * `path` is a human-readable pointer like "value[3].displayName".
+   * Arrays are compared element-wise by index.
+   */
+  function diffJson(before, after, limit) {
+    var max = limit || 500;
+    var out = [];
+
+    function record(path, kind, beforeValue, afterValue) {
+      if (out.length < max) {
+        out.push({ path: path || '(root)', kind: kind, before: beforeValue, after: afterValue });
+      }
+    }
+
+    function walk(a, b, path) {
+      if (out.length >= max) {
+        return;
+      }
+      if (a === b) {
+        return;
+      }
+      var aIsObj = a !== null && typeof a === 'object';
+      var bIsObj = b !== null && typeof b === 'object';
+      if (!aIsObj || !bIsObj || Array.isArray(a) !== Array.isArray(b)) {
+        record(path, 'changed', a, b);
+        return;
+      }
+      if (Array.isArray(a)) {
+        var shared = Math.min(a.length, b.length);
+        for (var i = 0; i < shared; i++) {
+          walk(a[i], b[i], path + '[' + i + ']');
+        }
+        for (var r = shared; r < a.length; r++) {
+          record(path + '[' + r + ']', 'removed', a[r], undefined);
+        }
+        for (var d = shared; d < b.length; d++) {
+          record(path + '[' + d + ']', 'added', undefined, b[d]);
+        }
+        return;
+      }
+      var keys = {};
+      Object.keys(a).forEach(function (key) {
+        keys[key] = true;
+      });
+      Object.keys(b).forEach(function (key) {
+        keys[key] = true;
+      });
+      Object.keys(keys).forEach(function (key) {
+        var childPath = path === '' ? key : path + '.' + key;
+        if (!(key in b)) {
+          record(childPath, 'removed', a[key], undefined);
+        } else if (!(key in a)) {
+          record(childPath, 'added', undefined, b[key]);
+        } else {
+          walk(a[key], b[key], childPath);
+        }
+      });
+    }
+
+    walk(before, after, '');
+    return out;
   }
 
   /**
@@ -1607,11 +1878,18 @@
     convertQuery: convertQuery,
     queryCompletions: queryCompletions,
     isBackgroundGraphRequest: isBackgroundGraphRequest,
+    sanitizeRequestHeaders: sanitizeRequestHeaders,
     graphRequestMatchesEditor: graphRequestMatchesEditor,
     classifyBackgroundRequest: classifyBackgroundRequest,
     applyAdvancedQuery: applyAdvancedQuery,
     parseGraphRequest: parseGraphRequest,
     buildDeepLink: buildDeepLink,
+    toTsv: toTsv,
+    sortRows: sortRows,
+    csvColumns: csvColumns,
+    csvShape: csvShape,
+    pathQuery: pathQuery,
+    diffJson: diffJson,
     upsertQueryHistory: upsertQueryHistory,
     trimQueryHistoryList: trimQueryHistoryList,
     groupQueryHistory: groupQueryHistory,

@@ -18,6 +18,8 @@
   --gejq-text: #242424;
   --gejq-text-subtle: #616161;
   --gejq-error: #b10e1c;
+  --gejq-warn: #8a5a00;
+  --gejq-live: #107c10;
   --gejq-json-key: #a31515;
   --gejq-json-string: #0451a5;
   --gejq-json-number: #098658;
@@ -25,8 +27,10 @@
   --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
 }
 
+/* Dark palette — applies via the OS preference (unless Graph Explorer's
+   own theme switcher says light) or via GE's dark/high-contrast theme. */
 @media (prefers-color-scheme: dark) {
-  :host {
+  :host(:not(.gejq-theme-light)) {
     --gejq-accent: #479ef5;
     --gejq-accent-hover: #62abf5;
     --gejq-bg: #292929;
@@ -35,12 +39,32 @@
     --gejq-text: #ffffff;
     --gejq-text-subtle: #adadad;
     --gejq-error: #f97b8b;
+    --gejq-warn: #f2c661;
+    --gejq-live: #6ccb5f;
     --gejq-json-key: #9cdcfe;
     --gejq-json-string: #ce9178;
     --gejq-json-number: #b5cea8;
     --gejq-json-literal: #569cd6;
     --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
   }
+}
+
+:host(.gejq-theme-dark) {
+  --gejq-accent: #479ef5;
+  --gejq-accent-hover: #62abf5;
+  --gejq-bg: #292929;
+  --gejq-bg-subtle: #1f1f1f;
+  --gejq-border: #4d4d4d;
+  --gejq-text: #ffffff;
+  --gejq-text-subtle: #adadad;
+  --gejq-error: #f97b8b;
+  --gejq-warn: #f2c661;
+  --gejq-live: #6ccb5f;
+  --gejq-json-key: #9cdcfe;
+  --gejq-json-string: #ce9178;
+  --gejq-json-number: #b5cea8;
+  --gejq-json-literal: #569cd6;
+  --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
 }
 
 /* ------------------------------------------------ floating action button */
@@ -260,15 +284,8 @@
 }
 
 .gejq-live-badge.gejq-live {
-  color: #107c10;
-  border-color: #107c10;
-}
-
-@media (prefers-color-scheme: dark) {
-  .gejq-live-badge.gejq-live {
-    color: #6ccb5f;
-    border-color: #6ccb5f;
-  }
+  color: var(--gejq-live);
+  border-color: var(--gejq-live);
 }
 
 /* ------------------------------------------------------------------ query */
@@ -380,15 +397,224 @@
   word-break: break-word;
 }
 
+.gejq-meta-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .gejq-meta {
   padding: 0 12px 4px;
   color: var(--gejq-text-subtle);
   font-size: 12px;
 }
 
+.gejq-meta-right {
+  flex: 0 0 auto;
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 11px;
+}
+
+/* ------------------------------------------------------------------ table */
+
+.gejq-table-scroll {
+  overflow: auto;
+  max-height: 100%;
+}
+
+.gejq-table {
+  border-collapse: collapse;
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 11px;
+  width: 100%;
+}
+
+.gejq-table th {
+  position: sticky;
+  top: 0;
+  background: var(--gejq-bg);
+  border-bottom: 2px solid var(--gejq-border);
+  padding: 0;
+  text-align: left;
+}
+
+.gejq-th-button {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  background: none;
+  color: var(--gejq-text);
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.gejq-th-button:hover,
+.gejq-th-button.gejq-th-active {
+  color: var(--gejq-accent);
+}
+
+.gejq-table td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--gejq-border);
+  vertical-align: top;
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gejq-table tbody tr:hover {
+  background: var(--gejq-bg);
+}
+
+/* ------------------------------------------------------------------- tree */
+
+.gejq-tree {
+  padding: 6px 10px;
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.gejq-tree-hint {
+  margin-bottom: 4px;
+  color: var(--gejq-text-subtle);
+  font-family: "Segoe UI", sans-serif;
+  font-size: 11px;
+}
+
+.gejq-tree-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.gejq-tree-toggle {
+  flex: 0 0 12px;
+  color: var(--gejq-text-subtle);
+  cursor: pointer;
+  user-select: none;
+}
+
+.gejq-tree-key {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--gejq-json-key);
+  font: inherit;
+  cursor: pointer;
+}
+
+.gejq-tree-key:hover {
+  text-decoration: underline;
+  color: var(--gejq-accent);
+}
+
+.gejq-tree-key-plain {
+  color: var(--gejq-json-key);
+}
+
+.gejq-tree-preview {
+  color: var(--gejq-text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gejq-tree-more {
+  color: var(--gejq-text-subtle);
+  font-size: 11px;
+  padding-left: 18px;
+}
+
+/* ------------------------------------------------------------------- diff */
+
+.gejq-diff-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 10px;
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 11px;
+  border-bottom: 1px solid var(--gejq-border);
+}
+
+.gejq-diff-marker {
+  flex: 0 0 10px;
+  font-weight: 700;
+}
+
+.gejq-diff-added .gejq-diff-marker,
+.gejq-diff-added .gejq-diff-detail {
+  color: var(--gejq-live);
+}
+
+.gejq-diff-removed .gejq-diff-marker,
+.gejq-diff-removed .gejq-diff-detail {
+  color: var(--gejq-error);
+}
+
+.gejq-diff-changed .gejq-diff-marker,
+.gejq-diff-changed .gejq-diff-detail {
+  color: var(--gejq-warn);
+}
+
+.gejq-diff-path {
+  color: var(--gejq-text);
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gejq-diff-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gejq-diff-row-controls,
+.gejq-diff-row {
+  min-width: 0;
+}
+
+.gejq-panel > .gejq-diff-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 12px 0;
+  border-bottom: none;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 12px;
+}
+
+.gejq-diff-label {
+  flex: 0 0 auto;
+  color: var(--gejq-text-subtle);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.gejq-diff-select {
+  flex: 1 !important;
+  width: auto !important;
+}
+
+.gejq-diff-toggle.gejq-tag-active {
+  color: #ffffff;
+  background: var(--gejq-accent);
+  border-radius: 4px;
+  opacity: 1;
+}
+
 .gejq-warning {
   padding: 0 12px;
-  color: #8a5a00;
+  color: var(--gejq-warn);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -397,10 +623,14 @@
   padding-bottom: 4px;
 }
 
-@media (prefers-color-scheme: dark) {
-  .gejq-warning {
-    color: #f2c661;
-  }
+.gejq-link-button {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--gejq-accent);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 .gejq-load {
@@ -431,6 +661,7 @@
   padding: 0 2px;
   border: none;
   background: none;
+  color: var(--gejq-text-subtle);
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
@@ -439,6 +670,32 @@
 
 .gejq-icon-mini:hover {
   opacity: 1;
+  color: var(--gejq-text);
+}
+
+/* Row actions revealed on hover (kept faintly visible for touch). */
+.gejq-example .gejq-hover {
+  opacity: 0.15;
+}
+
+.gejq-example:hover .gejq-hover,
+.gejq-example .gejq-hover:focus-visible {
+  opacity: 1;
+}
+
+.gejq-history-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.gejq-icon-button.gejq-danger {
+  border-color: var(--gejq-error);
+  color: var(--gejq-error);
+}
+
+.gejq-action-small {
+  flex: 0 0 auto;
+  min-width: 44px;
 }
 
 .gejq-tag-input {
