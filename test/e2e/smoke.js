@@ -284,30 +284,28 @@ function check(name, ok, extra) {
   }, { timeout: 10000 });
   check('graph response captured into history', true);
 
-  // 3. Type a JMESPath query, verify the live result. The editor is
-  // CodeMirror: type into its contenteditable, read back via the
-  // container's input-like .value getter.
-  const query = page.locator('.gejq-query-input .cm-content');
+  // 3. Type a JMESPath query, verify the live result. The default editor
+  // is a plain textarea (the CodeMirror editor is opt-in — tested in its
+  // own block below). queryValue reads the textarea's value, or the
+  // CodeMirror container's data-query mirror when the rich editor is on.
+  const query = page.locator('.gejq-query-input');
   const queryValue = () =>
-    page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input').dataset.query);
+    page.evaluate(() => {
+      const el = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input');
+      return typeof el.value === 'string' ? el.value : el.dataset.query || '';
+    });
   check(
-    'CodeMirror editor mounted',
-    await page.evaluate(() => !!document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-editor .cm-editor'))
+    'plain query editor mounted by default',
+    await page.evaluate(() => {
+      const el = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input');
+      return el && el.tagName === 'TEXTAREA';
+    })
   );
   await query.fill('value[].{name: displayName, email: mail}');
   await page.waitForTimeout(400);
   const resultText = await page.locator('.gejq-result').innerText();
   check('reshape query returns expected data', resultText.includes('adele@contoso.com') && resultText.includes('"name"'));
-  check('editor mirrors its value to data-query', (await queryValue()) === 'value[].{name: displayName, email: mail}');
-  const editorDecorations = await page.evaluate(() => {
-    const shadow = document.getElementById('gejq-host').shadowRoot;
-    return {
-      highlightSpans: shadow.querySelectorAll('.gejq-query-editor .cm-line span[class]').length,
-      matchingBrackets: shadow.querySelectorAll('.gejq-query-editor .cm-matchingBracket').length
-    };
-  });
-  check('query editor highlights tokens', editorDecorations.highlightSpans > 0, JSON.stringify(editorDecorations));
-  check('bracket matching active at the caret', editorDecorations.matchingBrackets >= 1, JSON.stringify(editorDecorations));
+  check('editor value reflects the text', (await queryValue()) === 'value[].{name: displayName, email: mail}');
 
   await query.fill("value[?jobTitle == 'Auditor'].displayName");
   await page.waitForTimeout(400);
@@ -480,6 +478,68 @@ function check(name, ok, extra) {
   await query.fill('$.value[*].mail');
   await page.waitForTimeout(400);
   check('JSONPath query works', (await page.locator('.gejq-result').innerText()).includes('p@x.com'));
+
+  // 8b. The opt-in CodeMirror editor: enabling the setting swaps the plain
+  // textarea for a syntax-highlighting editor, in place, keeping the query.
+  await popup.selectOption('#setting-language', 'jmespath');
+  await page.waitForTimeout(300);
+  await query.fill('value[].displayName');
+  await page.waitForTimeout(300);
+  await popup.check('#setting-rich-editor');
+  await page.waitForFunction(
+    () => !!document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-editor .cm-editor'),
+    { timeout: 5000 }
+  );
+  check(
+    'enabling the setting swaps in the CodeMirror editor',
+    await page.evaluate(() => {
+      const el = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input');
+      return el && el.classList.contains('gejq-query-editor') && !!el.querySelector('.cm-editor');
+    })
+  );
+  check('editor swap preserves the query text', (await queryValue()) === 'value[].displayName', await queryValue());
+  const cmContent = page.locator('.gejq-query-editor .cm-content');
+  // Regression: CodeMirror must be told it lives in the ShadowRoot (the
+  // `root` option). Without it, CM injects its stylesheet into
+  // document.head — invisible to the shadow DOM — so the caret jumps to
+  // position 0 on every edit, the end of the line is unreachable, and the
+  // aria-live "announced" region ("Selection deleted") shows through
+  // unstyled. Type character-by-character (fill() would hide the bug);
+  // closeBrackets over-types the closing ], so the literal string
+  // round-trips exactly unless the caret is jumping.
+  await cmContent.click();
+  await page.keyboard.press('Control+A');
+  await page.keyboard.press('Delete');
+  await page.keyboard.type('value[0].displayName');
+  await page.waitForTimeout(300);
+  check('CM: incremental typing keeps character order (no caret jump)', (await queryValue()) === 'value[0].displayName', await queryValue());
+  await page.keyboard.type(' too');
+  await page.waitForTimeout(200);
+  check('CM: can keep typing at the end of the query', (await queryValue()) === 'value[0].displayName too', await queryValue());
+  const cmStyled = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const announce = shadow.querySelector('.gejq-query-editor .cm-announced');
+    return {
+      announce: announce ? getComputedStyle(announce).position : 'missing',
+      highlightSpans: shadow.querySelectorAll('.gejq-query-editor .cm-line span[class]').length
+    };
+  });
+  // CM's baseTheme sets .cm-announced to position:fixed (off-screen). Any
+  // non-static value proves the stylesheet reached the shadow root rather
+  // than document.head; a broken root would leave it at the default static.
+  check('CM: stylesheet applied inside the shadow root', cmStyled.announce !== 'static' && cmStyled.announce !== 'missing', JSON.stringify(cmStyled));
+  check('CM: highlights tokens', cmStyled.highlightSpans > 0, JSON.stringify(cmStyled));
+  // Back to the default plain editor for the remaining checks.
+  await popup.uncheck('#setting-rich-editor');
+  await page.waitForFunction(
+    () => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-input').tagName === 'TEXTAREA',
+    { timeout: 5000 }
+  );
+  check('disabling the setting restores the plain textarea', (await queryValue()) === 'value[0].displayName too', await queryValue());
+  await popup.selectOption('#setting-language', 'jsonpath');
+  await page.waitForTimeout(300);
+  await query.fill('$.value[*].mail');
+  await page.waitForTimeout(300);
 
   // 9. Enter records the query into the persistent history with timestamp + context.
   await query.press('Enter');
@@ -906,7 +966,9 @@ function check(name, ok, extra) {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     return {
       firstOption: shadow.querySelector('.gejq-history-select option').textContent,
-      query: shadow.querySelector('.gejq-query-input').dataset.query,
+      query: (function (el) {
+        return typeof el.value === 'string' ? el.value : el.dataset.query || '';
+      })(shadow.querySelector('.gejq-query-input')),
       result: shadow.querySelector('.gejq-result').textContent
     };
   });

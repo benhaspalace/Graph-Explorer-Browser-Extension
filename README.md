@@ -36,12 +36,14 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   pieces [Microsoft Graph advanced queries](https://learn.microsoft.com/graph/aad-advanced-queries)
   require. Everything happens in the query view itself; requests are never
   modified behind the scenes. On by default; toggle it in the settings.
-- **A real code editor** — the query box is a CodeMirror 6 editor with
-  syntax highlighting for all three languages (strings, numbers,
+- **Query editor** — a plain, dependable text box by default. Turn on
+  **Syntax-highlighting query editor** in the settings to switch to a
+  CodeMirror 6 editor with per-language highlighting (strings, numbers,
   functions, `@`/`$` references, properties), matching-bracket
-  highlighting, auto-closing brackets and quotes, and undo/redo history.
-  Enter runs and saves the query; Shift+Enter inserts a line break; drag
-  the bottom edge to grow the box.
+  highlighting, auto-closing brackets/quotes, and undo/redo — Shift+Enter
+  then inserts a line break. Either way, Enter runs and saves the query
+  and the box is drag-resizable; switching the setting swaps the editor in
+  place, keeping your current query.
 - **Query completion** — typing in the query box opens a completion
   dropdown: property names resolved from the selected response at the path
   before the cursor (`value[].` → `displayName`, `mail`, … with type hints)
@@ -175,6 +177,7 @@ Click the toolbar icon to open the settings popup:
 | Auto-fetch all pages | off | Follows `@odata.nextLink` and adds the combined dataset to the response list |
 | Auto-fetch limits | 50 pages / 10 MB | Stops the chain at these limits; the panel warns when a dataset was cut off |
 | Show background requests | off | Reveal Graph Explorer's own requests in the response list (marked ⚙) |
+| Syntax-highlighting query editor | off | Swap the plain query box for the CodeMirror editor (highlighting, bracket matching, undo) |
 | Query history limit | 50 | How many distinct queries to keep (checkbox for unlimited) |
 
 ### Query examples (JMESPath)
@@ -209,10 +212,13 @@ See the [JMESPath tutorial](https://jmespath.org/tutorial.html) and the
   and `vendor/jqts.js` ([jqts](https://github.com/kentdotn/jqts) 0.0.8, MIT —
   a pure-JS jq clone covering core jq; no WASM needed) evaluate the queries.
 - `vendor/codemirror.js` is a bundled [CodeMirror 6](https://codemirror.net)
-  (MIT) that powers the query editor; the tokenizers for the three query
-  languages are the extension's own (`nextQueryToken` in
-  `src/query-utils.js`). If the bundle ever fails to load, the panel falls
-  back to a plain textarea with identical behavior.
+  (MIT) that powers the optional syntax-highlighting query editor; the
+  tokenizers for the three query languages are the extension's own
+  (`nextQueryToken` in `src/query-utils.js`). The default editor is a plain
+  textarea; the panel also falls back to it if the bundle fails to load. It
+  is mounted with CodeMirror's `root` option pointing at the panel's
+  ShadowRoot so the editor's stylesheet and selection handling work inside
+  the shadow DOM.
 
 ### Privacy
 

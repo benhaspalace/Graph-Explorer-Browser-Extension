@@ -41,7 +41,8 @@
     autoFetchMaxMb: 10,
     queryLanguage: 'jmespath',
     historyLimit: 50, // 0 = unlimited
-    showBackgroundRequests: false
+    showBackgroundRequests: false,
+    richEditor: false // opt-in CodeMirror editor; plain textarea by default
   });
   // The signed-out "profile view" button in Graph Explorer's top bar —
   // clicking it starts the sign-in flow.
@@ -759,7 +760,8 @@
       autoFetchMaxMb: GEJQ.clampInt(raw && raw.autoFetchMaxMb, 1, 50, DEFAULT_SETTINGS.autoFetchMaxMb),
       queryLanguage: raw && LANGUAGES[raw.queryLanguage] ? raw.queryLanguage : DEFAULT_SETTINGS.queryLanguage,
       historyLimit: historyLimit,
-      showBackgroundRequests: !!raw && raw.showBackgroundRequests === true
+      showBackgroundRequests: !!raw && raw.showBackgroundRequests === true,
+      richEditor: !!raw && raw.richEditor === true
     };
   }
 
@@ -2097,7 +2099,7 @@
    * replaceRange never fire the input handler — callers do their own
    * bookkeeping, mirroring how assigning input.value works.
    */
-  function createQueryEditor() {
+  function createQueryEditor(root) {
     var handlers = {
       input: function () {
         state.query = editor.getValue();
@@ -2140,8 +2142,37 @@
         setTimeout(closeAutocomplete, 150);
       }
     };
-    var editor = window.GEJQCM ? codeMirrorEditor(handlers) : textareaEditor(handlers);
+    var useRich = state.settings.richEditor && window.GEJQCM;
+    var editor = useRich ? codeMirrorEditor(handlers, root) : textareaEditor(handlers);
+    editor.rich = !!useRich;
     return editor;
+  }
+
+  /**
+   * Rebuild the query editor in place when the editor-mode setting flips.
+   * Preserves the current query text and focus; destroys the old instance.
+   */
+  function swapQueryEditor() {
+    if (!ui || !ui.queryEditor) {
+      return;
+    }
+    var wantRich = state.settings.richEditor && window.GEJQCM;
+    if (ui.queryEditor.rich === wantRich) {
+      return;
+    }
+    var current = ui.queryEditor.getValue();
+    var oldNode = ui.queryEditor.node;
+    if (ui.queryEditor.destroy) {
+      ui.queryEditor.destroy();
+    }
+    var next = createQueryEditor(ui.shadow);
+    oldNode.parentNode.replaceChild(next.node, oldNode);
+    ui.queryEditor = next;
+    ui.queryInput = next.node;
+    next.setLanguage(state.settings.queryLanguage);
+    next.setPlaceholder(LANGUAGES[state.settings.queryLanguage].placeholder);
+    next.setValue(current);
+    closeAutocomplete();
   }
 
   function textareaEditor(handlers) {
@@ -2173,11 +2204,12 @@
       setPlaceholder: function (text) {
         input.placeholder = text;
       },
-      setLanguage: function () {}
+      setLanguage: function () {},
+      destroy: function () {}
     };
   }
 
-  function codeMirrorEditor(handlers) {
+  function codeMirrorEditor(handlers, root) {
     var cm = window.GEJQCM;
     var container = el('div', 'gejq-query-input gejq-query-editor');
     var programmatic = false;
@@ -2203,6 +2235,12 @@
     }
     var view = new cm.EditorView({
       parent: container,
+      // Critical inside a ShadowRoot: CodeMirror must know its root node so
+      // it injects its stylesheet there (not document.head, which the shadow
+      // DOM can't see) and reads the browser selection from the right root.
+      // Without this the caret jumps to position 0 on every edit and the
+      // screen-reader "announced" region shows through unstyled.
+      root: root || document,
       state: cm.EditorState.create({
         doc: '',
         extensions: [
@@ -2275,6 +2313,9 @@
       },
       setLanguage: function (languageKey) {
         view.dispatch({ effects: languageCompartment.reconfigure(streamLanguage(languageKey)) });
+      },
+      destroy: function () {
+        view.destroy();
       }
     };
     container.dataset.query = '';
@@ -2450,7 +2491,7 @@
     });
     queryRow.appendChild(languageSelect);
     var queryWrap = el('div', 'gejq-query-wrap');
-    var queryEditor = createQueryEditor();
+    var queryEditor = createQueryEditor(shadow);
     var autocompleteList = el('div', 'gejq-autocomplete');
     autocompleteList.style.display = 'none';
     queryWrap.appendChild(queryEditor.node);
@@ -2671,6 +2712,7 @@
 
     ui = {
       host: host,
+      shadow: shadow,
       fab: fab,
       fabBadge: fabBadge,
       panel: panel,
@@ -2882,8 +2924,12 @@
         }
         var previousLanguage = state.settings.queryLanguage;
         var previousShowBackground = state.settings.showBackgroundRequests;
+        var previousRichEditor = state.settings.richEditor;
         state.settings = normalizeSettings(changes[STORAGE_KEY_SETTINGS].newValue);
         pushSettingsToPage();
+        if (ui && state.settings.richEditor !== previousRichEditor) {
+          swapQueryEditor();
+        }
         if (ui && state.settings.showBackgroundRequests !== previousShowBackground) {
           refreshHistorySelect();
           updateBadge();
