@@ -7,6 +7,21 @@ const GEJQ = require('../src/query-utils.js');
 const jmespath = require('../vendor/jmespath.js');
 const { JSONPath } = require('../vendor/jsonpath-plus.js');
 
+// vendor/jqts.js is an IIFE browser bundle exposing a JQTS global.
+const vm = require('node:vm');
+const jqtsContext = { self: {} };
+vm.createContext(jqtsContext);
+vm.runInContext(require('node:fs').readFileSync(__dirname + '/../vendor/jqts.js', 'utf8') + '; this.JQTS = JQTS;', jqtsContext);
+const jq = jqtsContext.JQTS.default || jqtsContext.JQTS;
+
+function runJq(query, json) {
+  const outputs = jq.compile(query).evaluate(json);
+  const result = outputs.length === 1 ? outputs[0] : outputs;
+  // The vm context has its own Array/Object prototypes, which trips
+  // assert.deepStrictEqual — normalize through JSON.
+  return result === undefined ? undefined : JSON.parse(JSON.stringify(result));
+}
+
 const SAMPLE_USERS_RESPONSE = {
   '@odata.context': 'https://graph.microsoft.com/v1.0/$metadata#users',
   '@odata.nextLink': 'https://graph.microsoft.com/v1.0/users?$skiptoken=abc',
@@ -241,6 +256,262 @@ test('formatTimestamp shows clock time today and full date otherwise', () => {
   const lastWeek = new Date(2026, 6, 30, 9, 5, 0).getTime();
   assert.equal(GEJQ.formatTimestamp(morning, noon), '09:05:07');
   assert.equal(GEJQ.formatTimestamp(lastWeek, noon), '2026-07-30 09:05');
+});
+
+test('suggestQueries proposes valid jq queries', () => {
+  const suggestions = GEJQ.suggestQueries(SAMPLE_USERS_RESPONSE, 'jq');
+  assert.ok(suggestions.includes('.value[].displayName'));
+  assert.ok(suggestions.includes('.value | length'));
+  const shapes = [SAMPLE_USERS_RESPONSE, [1, 2], { a: 1 }, { value: [] }, null];
+  for (const shape of shapes) {
+    for (const query of GEJQ.suggestQueries(shape, 'jq')) {
+      assert.doesNotThrow(() => runJq(query, shape), `jq query ${query} should run`);
+    }
+  }
+});
+
+test('the documented jq examples run on the sample response', () => {
+  const examples = [
+    '.value[].displayName',
+    '.value | map(select(.jobTitle == "Auditor"))',
+    '[.value[] | {name: .displayName, email: .mail}]',
+    '.value | sort_by(.displayName) | .[].displayName',
+    '.value | length'
+  ];
+  for (const example of examples) {
+    assert.doesNotThrow(() => runJq(example, SAMPLE_USERS_RESPONSE), example);
+  }
+  assert.deepEqual(runJq('.value[].displayName', SAMPLE_USERS_RESPONSE), [
+    'Adele Vance',
+    'Alex Wilber',
+    'Megan Bowen'
+  ]);
+  assert.equal(runJq('.value | length', SAMPLE_USERS_RESPONSE), 3);
+});
+
+test('convertQuery translates simple paths between all three languages', () => {
+  const conversions = [
+    ['jsonpath', 'jmespath', '$.value[*].displayName', 'value[].displayName'],
+    ['jsonpath', 'jmespath', "$['@odata.nextLink']", '"@odata.nextLink"'],
+    ['jsonpath', 'jmespath', '$.value[?(@.mail)].mail', 'value[?mail].mail'],
+    ['jsonpath', 'jmespath', "$.value[?(@.jobTitle == 'Auditor')]", "value[?jobTitle == 'Auditor']"],
+    ['jsonpath', 'jmespath', '$.value.length', 'length(value)'],
+    ['jmespath', 'jsonpath', 'value[].displayName', '$.value[*].displayName'],
+    ['jmespath', 'jsonpath', 'length(value)', '$.value.length'],
+    ['jmespath', 'jsonpath', '"@odata.nextLink"', "$['@odata.nextLink']"],
+    ['jmespath', 'jsonpath', "value[?jobTitle == 'Auditor'].mail", "$.value[?(@.jobTitle == 'Auditor')].mail"],
+    ['jmespath', 'jq', 'value[].displayName', '.value[].displayName'],
+    ['jmespath', 'jq', 'length(value)', '.value | length'],
+    ['jmespath', 'jq', "value[?jobTitle == 'Auditor']", '.value | map(select(.jobTitle == "Auditor"))'],
+    ['jmespath', 'jq', 'value[0].mail', '.value[0].mail'],
+    ['jq', 'jmespath', '.value[].displayName', 'value[].displayName'],
+    ['jq', 'jmespath', '.value | length', 'length(value)'],
+    ['jq', 'jsonpath', '."@odata.nextLink"', "$['@odata.nextLink']"],
+    ['jsonpath', 'jq', '$.value[*].mail', '.value[].mail'],
+    ['jsonpath', 'jq', '$.value[0:5]', '.value[0:5]']
+  ];
+  for (const [from, to, input, expected] of conversions) {
+    const result = GEJQ.convertQuery(input, from, to);
+    assert.equal(result.ok, true, `${from}→${to} ${input}`);
+    assert.equal(result.query, expected, `${from}→${to} ${input}`);
+  }
+});
+
+test('converted queries actually run in the target engine', () => {
+  const engines = {
+    jmespath: (q) => jmespath.search(SAMPLE_USERS_RESPONSE, q),
+    jsonpath: (q) => JSONPath({ path: q, json: SAMPLE_USERS_RESPONSE, wrap: true }),
+    jq: (q) => runJq(q, SAMPLE_USERS_RESPONSE)
+  };
+  const sources = { jmespath: 'value[].displayName', jsonpath: '$.value[*].displayName', jq: '.value[].displayName' };
+  const expected = ['Adele Vance', 'Alex Wilber', 'Megan Bowen'];
+  for (const from of Object.keys(sources)) {
+    for (const to of Object.keys(engines)) {
+      const converted = GEJQ.convertQuery(sources[from], from, to);
+      assert.equal(converted.ok, true, `${from}→${to}`);
+      assert.deepEqual(engines[to](converted.query), expected, `${from}→${to}: ${converted.query}`);
+    }
+  }
+});
+
+test('convertQuery refuses queries outside the simple-path subset', () => {
+  const unconvertible = [
+    ['jmespath', 'jsonpath', 'value[].{name: displayName}'],
+    ['jmespath', 'jsonpath', 'sort_by(value, &displayName)'],
+    ['jmespath', 'jq', "value[?jobTitle == 'x'].mail"], // filter not last
+    ['jsonpath', 'jmespath', '$..displayName'],
+    ['jq', 'jmespath', '.value | map(select(.a == "b"))'],
+    ['jq', 'jmespath', '.'],
+    ['jsonpath', 'jmespath', 'not even a path']
+  ];
+  for (const [from, to, query] of unconvertible) {
+    assert.equal(GEJQ.convertQuery(query, from, to).ok, false, `${from}→${to} ${query}`);
+  }
+  // Same-language conversion is the identity.
+  assert.deepEqual(GEJQ.convertQuery('anything | at all', 'jq', 'jq'), { ok: true, query: 'anything | at all' });
+});
+
+test('upsertQueryHistory preserves stars and tags across re-runs', () => {
+  let history = GEJQ.upsertQueryHistory([], { query: 'a', language: 'jmespath', lastUsed: 1, context: null }, 10);
+  history[0].starred = true;
+  history[0].tags = ['users'];
+  history = GEJQ.upsertQueryHistory(history, { query: 'a', language: 'jmespath', lastUsed: 2, context: null }, 10);
+  assert.equal(history[0].starred, true);
+  assert.deepEqual(history[0].tags, ['users']);
+});
+
+test('trimQueryHistoryList removes oldest unstarred entries first', () => {
+  const entries = [
+    { query: 'q5', starred: false },
+    { query: 'q4', starred: true },
+    { query: 'q3', starred: false },
+    { query: 'q2', starred: true },
+    { query: 'q1', starred: false }
+  ];
+  const trimmed = GEJQ.trimQueryHistoryList(entries, 3);
+  assert.deepEqual(trimmed.map((e) => e.query), ['q5', 'q4', 'q2']);
+  // Favorites are never dropped, even when they alone exceed the limit.
+  const allStarred = [{ query: 'a', starred: true }, { query: 'b', starred: true }];
+  assert.deepEqual(GEJQ.trimQueryHistoryList(allStarred, 1).length, 2);
+  assert.equal(GEJQ.trimQueryHistoryList(entries, 0), entries);
+});
+
+test('groupQueryHistory orders favorites, tag groups, then recent', () => {
+  const groups = GEJQ.groupQueryHistory([
+    { query: 'newest', starred: false, tags: [] },
+    { query: 'tagged-b', starred: false, tags: ['beta'] },
+    { query: 'fav', starred: true, tags: ['ignored-when-starred'] },
+    { query: 'tagged-a', starred: false, tags: ['alpha', 'second'] },
+    { query: 'old', starred: false }
+  ]);
+  assert.deepEqual(groups.map((g) => g.title), ['★ Favorites', 'alpha', 'beta', 'Recent']);
+  assert.deepEqual(groups[0].items.map((i) => i.query), ['fav']);
+  assert.deepEqual(groups[1].items.map((i) => i.query), ['tagged-a']);
+  assert.deepEqual(groups[3].items.map((i) => i.query), ['newest', 'old']);
+  assert.deepEqual(GEJQ.groupQueryHistory([]), []);
+});
+
+test('queryCompletions matches identifier fragments per language', () => {
+  const jmes = GEJQ.queryCompletions('jmespath', 'sort_by(value, &displayName) | so');
+  assert.ok(jmes.items.map((i) => i.label).includes('sort('));
+  assert.ok(jmes.items.map((i) => i.label).includes('sort_by('));
+  assert.equal(jmes.fragment, 'so');
+  assert.equal(jmes.replaceFrom, 'sort_by(value, &displayName) | '.length);
+
+  const jq = GEJQ.queryCompletions('jq', '.value | uniq');
+  assert.deepEqual(jq.items.map((i) => i.label), ['unique_by(', 'unique']);
+
+  const jsonpath = GEJQ.queryCompletions('jsonpath', '$.value fil');
+  assert.ok(jsonpath.items.some((i) => i.insert.startsWith('[?(')));
+
+  assert.equal(GEJQ.queryCompletions('jmespath', 'value['), null); // no fragment
+  assert.equal(GEJQ.queryCompletions('jmespath', ''), null);
+  assert.equal(GEJQ.queryCompletions('jmespath', "value[?contains(displayName, 'so"), null); // inside string
+  // Typed-out JMESPath 'length' still completes to 'length(' (adds the paren)…
+  assert.ok(GEJQ.queryCompletions('jmespath', 'length').items.some((i) => i.label === 'length('));
+  // …while an exact bare-word match (jq 'length') has nothing left to add.
+  assert.equal(GEJQ.queryCompletions('jq', '.value | length'), null);
+  assert.equal(GEJQ.queryCompletions('unknown', 'so'), null);
+  const caseInsensitive = GEJQ.queryCompletions('jmespath', 'SORT');
+  assert.ok(caseInsensitive && caseInsensitive.items.length >= 2);
+});
+
+test('every JMESPath completion is a real jmespath.js function', () => {
+  const source = require('node:fs').readFileSync(__dirname + '/../vendor/jmespath.js', 'utf8');
+  let count = 0;
+  for (const letter of 'abcdefghijklmnopqrstuvwxyz') {
+    const result = GEJQ.queryCompletions('jmespath', letter);
+    for (const item of (result && result.items) || []) {
+      const name = item.label.replace(/\($/, '');
+      assert.ok(new RegExp('"?' + name + '"?: \\{').test(source), `${name} must exist in jmespath functionTable`);
+      count++;
+    }
+  }
+  assert.ok(count >= 26, `expected the full function list, saw ${count}`);
+});
+
+test('every jq completion compiles in the bundled jqts engine', () => {
+  const seen = new Set();
+  for (const letter of 'abcdefghijklmnopqrstuvwxyz') {
+    const result = GEJQ.queryCompletions('jq', letter);
+    for (const item of (result && result.items) || []) {
+      if (seen.has(item.label)) continue;
+      seen.add(item.label);
+      const probe = item.insert.endsWith('(') ? item.insert + '.)' : item.insert;
+      assert.doesNotThrow(() => jq.compile(probe), `jq builtin ${item.label} must compile (${probe})`);
+    }
+  }
+  assert.ok(seen.size >= 30, `expected a substantial jq list, got ${seen.size}`);
+});
+
+test('isBackgroundGraphRequest flags Graph Explorer internals only', () => {
+  const background = [
+    'https://graph.microsoft.com/v1.0/me',
+    'https://graph.microsoft.com/beta/me/profile',
+    'https://graph.microsoft.com/v1.0/organization',
+    "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?$filter=clientId eq 'x'",
+    'https://graph.microsoft.com/v1.0/oauth2PermissionGrants/abc123',
+    "https://graph.microsoft.com/v1.0/servicePrincipals?$filter=appId eq 'de8bc8b5-d9f9-48b1-a8ad-b748da725064'",
+    'https://graph.microsoft.com/v1.0/users?$filter=id%20eq%20%27de8bc8b5-d9f9-48b1-a8ad-b748da725064%27'
+  ];
+  const userRun = [
+    'https://graph.microsoft.com/v1.0/me?$select=displayName',
+    'https://graph.microsoft.com/v1.0/me/messages',
+    'https://graph.microsoft.com/v1.0/organization?$select=id',
+    'https://graph.microsoft.com/v1.0/users?$top=5',
+    'pasted JSON #1'
+  ];
+  for (const url of background) {
+    assert.equal(GEJQ.isBackgroundGraphRequest(url), true, url);
+  }
+  for (const url of userRun) {
+    assert.equal(GEJQ.isBackgroundGraphRequest(url), false, url);
+  }
+});
+
+test('graphRequestMatchesEditor tolerates encoding and injected $count', () => {
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor(
+      "https://graph.microsoft.com/v1.0/users?%24filter=startswith(displayName%2C'a')&%24count=true",
+      "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'a')"
+    ),
+    true
+  );
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor('https://graph.microsoft.com/v1.0/me', 'https://graph.microsoft.com/v1.0/me'),
+    true
+  );
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor('https://graph.microsoft.com/v1.0/me', 'https://graph.microsoft.com/v1.0/users'),
+    false
+  );
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor(
+      'https://graph.microsoft.com/v1.0/users?$top=5',
+      'https://graph.microsoft.com/v1.0/users?$top=10'
+    ),
+    false
+  );
+  assert.equal(GEJQ.graphRequestMatchesEditor('https://graph.microsoft.com/v1.0/me', ''), false);
+  assert.equal(GEJQ.graphRequestMatchesEditor('not a url', 'https://graph.microsoft.com/v1.0/me'), false);
+});
+
+test('classifyBackgroundRequest combines pattern, editor, and run signals', () => {
+  const ME = 'https://graph.microsoft.com/v1.0/me';
+  const ORG = 'https://graph.microsoft.com/v1.0/organization';
+  const USERS = 'https://graph.microsoft.com/v1.0/users?$top=5';
+  // Sign-in burst: /me matches the pre-filled field but nothing was run.
+  assert.equal(GEJQ.classifyBackgroundRequest(ME, ME, -1), true);
+  // Deliberately running GET /me: field matches and a run just happened.
+  assert.equal(GEJQ.classifyBackgroundRequest(ME, ME, 500), false);
+  // Internal organization lookup while the field shows something else.
+  assert.equal(GEJQ.classifyBackgroundRequest(ORG, USERS, 500), true);
+  // Normal user query matching the field, even without a tracked run.
+  assert.equal(GEJQ.classifyBackgroundRequest(USERS, USERS, -1), false);
+  // Unknown call matching neither field nor a recent run stays hidden.
+  assert.equal(GEJQ.classifyBackgroundRequest('https://graph.microsoft.com/v1.0/whatever', USERS, -1), true);
+  // …but a recent run rescues unknown non-pattern URLs (field edited).
+  assert.equal(GEJQ.classifyBackgroundRequest('https://graph.microsoft.com/v1.0/whatever', USERS, 500), false);
 });
 
 test('clampInt clamps numbers and numeric strings, falls back otherwise', () => {

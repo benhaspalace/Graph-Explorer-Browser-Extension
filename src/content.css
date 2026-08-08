@@ -126,7 +126,7 @@
    area — a normal-flow block instead of a fixed drawer. Query input sits
    on top, results underneath. */
 .gejq-panel.gejq-embedded {
-  position: static;
+  position: relative; /* in-flow; anchors the resize handle */
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -135,6 +135,26 @@
   border: 1px solid var(--gejq-border);
   border-radius: 6px;
   box-shadow: none;
+}
+
+/* Drag handle between Graph Explorer's response view and the panel. */
+.gejq-resizer {
+  display: none;
+}
+
+.gejq-embedded .gejq-resizer {
+  display: block;
+  position: absolute;
+  left: -5px;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  cursor: col-resize;
+  z-index: 10;
+}
+
+.gejq-embedded .gejq-resizer:hover {
+  background: linear-gradient(to right, transparent 3px, var(--gejq-accent) 3px, var(--gejq-accent) 6px, transparent 6px);
 }
 
 .gejq-embedded .gejq-header {
@@ -193,10 +213,33 @@
 /* ---------------------------------------------------------------- history */
 
 .gejq-history-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
   padding: 8px 12px 0;
 }
 
+.gejq-bg-toggle {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.gejq-bg-toggle.gejq-seg-active {
+  background: var(--gejq-accent);
+  border-color: var(--gejq-accent);
+  color: #ffffff;
+}
+
 .gejq-history-select {
+  flex: 1;
+  min-width: 0;
   width: 100%;
   padding: 6px 8px;
   border: 1px solid var(--gejq-border);
@@ -205,6 +248,47 @@
   color: var(--gejq-text);
   font-family: Consolas, "Cascadia Code", Menlo, monospace;
   font-size: 12px;
+}
+
+/* ---------------------------------------------------------- response info */
+
+.gejq-response-info {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 12px 0;
+  font-size: 11px;
+  color: var(--gejq-text-subtle);
+}
+
+.gejq-response-url {
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  word-break: break-all;
+  user-select: text;
+  cursor: text;
+}
+
+.gejq-live-badge {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gejq-live-badge.gejq-live {
+  color: #107c10;
+  border-color: #107c10;
+}
+
+@media (prefers-color-scheme: dark) {
+  .gejq-live-badge.gejq-live {
+    color: #6ccb5f;
+    border-color: #6ccb5f;
+  }
 }
 
 /* ------------------------------------------------------------------ query */
@@ -218,7 +302,8 @@
 
 .gejq-lang-select {
   flex: 0 0 auto;
-  padding: 6px 4px;
+  height: 32px;
+  padding: 0 4px;
   border: 1px solid var(--gejq-border);
   border-radius: 4px;
   background: var(--gejq-bg);
@@ -232,9 +317,62 @@
   margin-bottom: 6px;
 }
 
+.gejq-query-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.gejq-autocomplete {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  box-shadow: var(--gejq-shadow);
+}
+
+.gejq-ac-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.gejq-ac-label {
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 12px;
+  color: var(--gejq-text);
+}
+
+.gejq-ac-detail {
+  font-size: 11px;
+  color: var(--gejq-text-subtle);
+  white-space: nowrap;
+}
+
+.gejq-ac-item.gejq-ac-active,
+.gejq-ac-item:hover {
+  background: var(--gejq-accent);
+}
+
+.gejq-ac-item.gejq-ac-active .gejq-ac-label,
+.gejq-ac-item.gejq-ac-active .gejq-ac-detail,
+.gejq-ac-item:hover .gejq-ac-label,
+.gejq-ac-item:hover .gejq-ac-detail {
+  color: #ffffff;
+}
+
 .gejq-query-input {
   width: 100%;
-  padding: 8px;
+  padding: 6px 8px;
   border: 1px solid var(--gejq-border);
   border-radius: 4px;
   background: var(--gejq-bg);
@@ -242,7 +380,9 @@
   font-family: Consolas, "Cascadia Code", Menlo, monospace;
   font-size: 13px;
   resize: vertical;
-  min-height: 40px;
+  /* Matches the language selector's height by default; drag to grow. */
+  height: 32px;
+  min-height: 32px;
 }
 
 .gejq-query-input:focus {
@@ -286,6 +426,50 @@
 .gejq-load {
   margin-left: auto;
   flex: 0 0 auto;
+}
+
+/* ---------------------------------------------------------- query history */
+
+.gejq-star {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: var(--gejq-text-subtle);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.gejq-star.gejq-starred,
+.gejq-star:hover {
+  color: #eaa300;
+}
+
+.gejq-icon-mini {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.gejq-icon-mini:hover {
+  opacity: 1;
+}
+
+.gejq-tag-input {
+  flex: 1;
+  min-width: 80px;
+  padding: 2px 6px;
+  border: 1px solid var(--gejq-accent);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  font-size: 11px;
 }
 
 /* ----------------------------------------------------------------- result */

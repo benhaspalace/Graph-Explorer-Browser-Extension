@@ -33,7 +33,17 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   <div id="request">Graph Explorer fixture —
     <button aria-label="HTTP request method option" id="ge-method">GET</button>
     <input aria-label="Query sample input" id="ge-editor-input" size="60" />
+    <button aria-label="Run query" id="ge-run">▶ Run query</button>
     <button aria-label="Sign in" id="fake-profile-view">(avatar)</button>
+    <span>
+      <button role="tab" aria-selected="true" id="fake-body-tab">Request body</button>
+      <button role="tab" aria-selected="false" id="request-headers">Request headers</button>
+    </span>
+    <div role="tabpanel" id="ge-headers-panel" hidden>
+      <input name="name" placeholder="Key" /> <input name="value" placeholder="Value" />
+      <button id="ge-add-header">Add</button>
+      <ul id="ge-header-list"></ul>
+    </div>
   </div>
   <div id="response-area"><div id="ge-response"><pre id="ge-json">(run a query)</pre></div></div>
 </div>
@@ -42,15 +52,41 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   document.getElementById('fake-profile-view').addEventListener('click', function () {
     window.__signInClicks++;
   });
-  // Mimic Graph Explorer running a query.
+  // Mimic Graph Explorer running a query: the URI field always holds the
+  // query being run (that's how the extension tells user queries apart
+  // from Graph Explorer's own background calls).
   window.runGraphQuery = function (path) {
-    return fetch('https://graph.microsoft.com' + (path || '/v1.0/users?$top=3'), {
+    var url = 'https://graph.microsoft.com' + (path || '/v1.0/users?$top=3');
+    document.getElementById('ge-editor-input').value = url;
+    return fetch(url, {
       headers: { Accept: 'application/json' }
     }).then(r => r.json()).then(j => {
       document.getElementById('ge-json').textContent = JSON.stringify(j, null, 2);
       return j;
     });
   };
+  document.getElementById('ge-run').addEventListener('click', function () {
+    var url = document.getElementById('ge-editor-input').value;
+    window.runGraphQuery(url.replace('https://graph.microsoft.com', ''));
+  });
+  // Minimal stand-in for GE's Request-headers tab.
+  function selectTab(which) {
+    document.getElementById('fake-body-tab').setAttribute('aria-selected', String(which === 'body'));
+    document.getElementById('request-headers').setAttribute('aria-selected', String(which === 'headers'));
+    document.getElementById('ge-headers-panel').hidden = which !== 'headers';
+  }
+  document.getElementById('fake-body-tab').addEventListener('click', function () { selectTab('body'); });
+  document.getElementById('request-headers').addEventListener('click', function () { selectTab('headers'); });
+  document.getElementById('ge-add-header').addEventListener('click', function () {
+    var name = document.querySelector('input[name="name"]');
+    var value = document.querySelector('input[name="value"]');
+    if (!name.value) return;
+    var li = document.createElement('li');
+    li.textContent = name.value + ': ' + value.value;
+    document.getElementById('ge-header-list').appendChild(li);
+    name.value = '';
+    value.value = '';
+  });
 </script>
 </body></html>`;
 
@@ -268,15 +304,54 @@ function check(name, ok, extra) {
   const meta = await page.locator('.gejq-meta').innerText();
   check('meta line describes result', meta.includes('array'), meta);
 
-  // Advanced-query setting (default on): $filter GET requests gain
-  // ConsistencyLevel: eventual and $count=true; plain GETs stay untouched.
-  await page.evaluate(() => window.runGraphQuery("/v1.0/users?$filter=startswith(displayName,'a')"));
+  // Advanced-query setting (default on): leaving the URI field with a
+  // $filter query visibly appends $count=true to the field itself (the
+  // ConsistencyLevel header goes through GE's Request-headers view,
+  // which this fixture doesn't have — the assist must not crash without
+  // it). Nothing is rewritten at the network layer.
+  await page.evaluate(() => {
+    const editor = document.getElementById('ge-editor-input');
+    editor.value = "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'a')";
+    editor.focus();
+  });
+  await page.locator('#ge-json').click(); // blur the URI field
+  await page.waitForTimeout(400);
+  const editorAfterAssist = await page.evaluate(() => document.getElementById('ge-editor-input').value);
+  check(
+    'advanced query visibly gains $count=true in the URI field',
+    editorAfterAssist === "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'a')&$count=true",
+    editorAfterAssist
+  );
+  // The header rows are added through GE's Request-headers view.
+  await page.waitForTimeout(800);
+  const headerRows = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('#ge-header-list li')).map((li) => li.textContent)
+  );
+  check('ConsistencyLevel added via the headers view', headerRows.includes('ConsistencyLevel: eventual'), headerRows.join(' | '));
+  check('Content-Type added via the headers view', headerRows.includes('Content-Type: application/json'), headerRows.join(' | '));
+  check(
+    'previous tab restored after adding headers',
+    await page.evaluate(() => document.getElementById('fake-body-tab').getAttribute('aria-selected') === 'true')
+  );
+  await page.locator('#ge-run').click(); // run it — the field content is what goes out
   await page.waitForTimeout(400);
   const advReq = graphRequests.find((r) => r.url.includes('%24filter') || r.url.includes('$filter'));
-  check('advanced query got ConsistencyLevel header', !!advReq && advReq.headers['consistencylevel'] === 'eventual', JSON.stringify(advReq && advReq.headers['consistencylevel']));
-  check('advanced query got $count=true', !!advReq && /[$%]24count=true|\$count=true/.test(advReq.url), advReq && advReq.url);
+  check('the visible $count=true is what got sent', !!advReq && /[$%]24count=true|\$count=true/.test(advReq.url), advReq && advReq.url);
+  check('no hidden header was injected', !!advReq && advReq.headers['consistencylevel'] === undefined);
   const plainReq = graphRequests.find((r) => r.url.includes('$top=3'));
   check('plain query left untouched', !!plainReq && !plainReq.url.includes('count') && plainReq.headers['consistencylevel'] === undefined);
+  // A plain query must not be touched when leaving the field either.
+  await page.evaluate(() => {
+    const editor = document.getElementById('ge-editor-input');
+    editor.value = 'https://graph.microsoft.com/v1.0/users?$top=3';
+    editor.focus();
+  });
+  await page.locator('#ge-json').click();
+  await page.waitForTimeout(300);
+  check(
+    'plain query URI field not touched by the assist',
+    (await page.evaluate(() => document.getElementById('ge-editor-input').value)) === 'https://graph.microsoft.com/v1.0/users?$top=3'
+  );
 
   // Auto sign-in: the fixture's profile-view button must get clicked once.
   check('auto sign-in clicked the profile view', (await page.evaluate(() => window.__signInClicks)) === 1);
@@ -398,6 +473,218 @@ function check(name, ok, extra) {
   }
   const warningText = await page.locator('.gejq-warning').innerText();
   check('truncation warning shown to the user', /incomplete|stopped early/i.test(warningText), warningText.slice(0, 90));
+
+  // 10d. Switching languages auto-converts simple queries.
+  await query.fill('$.value[*].displayName');
+  await page.waitForTimeout(300);
+  await page.locator('.gejq-lang-select').selectOption('jmespath');
+  await page.waitForTimeout(400);
+  check('language switch converts the query', (await query.inputValue()) === 'value[].displayName', await query.inputValue());
+  check('converted query runs without error', (await page.locator('.gejq-panel .gejq-error').first().innerText()).trim() === '');
+  check('converted query returns data', (await page.locator('.gejq-result').innerText()).includes('Nestor Wilke'));
+
+  // 10e. Unconvertible queries keep their text, but suggestions follow
+  // the new language even while the query errors: `$..displayName` has
+  // no JMESPath equivalent and errors there as a syntax error.
+  await page.locator('.gejq-lang-select').selectOption('jsonpath');
+  await query.fill('$..displayName');
+  await page.waitForTimeout(300);
+  await page.locator('.gejq-lang-select').selectOption('jmespath');
+  await page.waitForTimeout(400);
+  check('unconvertible query left untouched', (await query.inputValue()) === '$..displayName');
+  check('error shown for incompatible query', (await page.locator('.gejq-panel .gejq-error').first().innerText()).trim() !== '');
+  const chipTexts = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-suggestions .gejq-chip')).map((c) => c.textContent);
+  });
+  check('suggestions refreshed to new language despite error', chipTexts.length > 0 && chipTexts.every((c) => !c.startsWith('$')), chipTexts.join(' | '));
+
+  // 10f. jq engine.
+  await page.locator('.gejq-lang-select').selectOption('jq');
+  await query.fill('.value | length');
+  await page.waitForTimeout(400);
+  check('jq count query works', (await page.locator('.gejq-result').innerText()).trim().includes('6'));
+  await query.fill('.value[].displayName');
+  await page.waitForTimeout(400);
+  check('jq iteration query works', (await page.locator('.gejq-result').innerText()).includes('Lidia Holloway'));
+
+  // 10f2. Tier-1 autocomplete in the query input.
+  await query.fill('.value | uniq');
+  await page.waitForTimeout(300);
+  const acItems = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const list = shadow.querySelector('.gejq-autocomplete');
+    return list.style.display === 'none'
+      ? null
+      : Array.from(list.querySelectorAll('.gejq-ac-label')).map((l) => l.textContent);
+  });
+  check('autocomplete dropdown offers matching builtins', !!acItems && acItems.includes('unique') && acItems.includes('unique_by('), (acItems || []).join(' | '));
+  await query.press('ArrowDown');
+  await query.press('Enter');
+  await page.waitForTimeout(200);
+  check('ArrowDown+Enter accepts the highlighted completion', (await query.inputValue()) === '.value | unique', await query.inputValue());
+  check(
+    'dropdown closes after accepting',
+    await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autocomplete').style.display === 'none')
+  );
+  await query.fill('.value | so');
+  await page.waitForTimeout(300);
+  await query.press('Escape');
+  const escState = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      dropdownHidden: shadow.querySelector('.gejq-autocomplete').style.display === 'none',
+      panelVisible: shadow.querySelector('.gejq-panel').offsetParent !== null
+    };
+  });
+  check('Escape closes the dropdown but not the panel', escState.dropdownHidden && escState.panelVisible, JSON.stringify(escState));
+  await query.fill('.value[].displayName');
+  await page.waitForTimeout(400);
+
+  // 10g. CSV toggle switches the output view itself.
+  await page.locator('.gejq-seg-btn', { hasText: 'CSV' }).click();
+  await page.waitForTimeout(300);
+  const csvView = await page.locator('.gejq-result').innerText();
+  check('CSV view renders CSV text', csvView.startsWith('value') && csvView.includes('Adele Vance'), csvView.slice(0, 40));
+  check('meta marks CSV view', (await page.locator('.gejq-meta').innerText()).includes('CSV view'));
+  await page.locator('.gejq-seg-btn', { hasText: 'JSON' }).click();
+  await page.waitForTimeout(200);
+  check('JSON view restored', (await page.locator('.gejq-result').innerText()).trim().startsWith('['));
+
+  // 10h. Response info line: full selectable URL plus live indicator.
+  const info = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      badge: shadow.querySelector('.gejq-live-badge').textContent,
+      url: shadow.querySelector('.gejq-response-url').textContent
+    };
+  });
+  check('response info shows live badge', info.badge.includes('live'), info.badge);
+  check('response info shows full URL', info.url.includes('https://graph.microsoft.com/v1.0/users?paged=1'), info.url);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const select = shadow.querySelector('.gejq-history-select');
+    select.value = select.options[1].value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForTimeout(200);
+  check(
+    'pinned badge when an older response is selected',
+    await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-live-badge').textContent.includes('pinned'))
+  );
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const select = shadow.querySelector('.gejq-history-select');
+    select.value = select.options[0].value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForTimeout(200);
+
+  // 10i. Star and tag grouping in the query history.
+  await query.fill('.value[].displayName');
+  await query.press('Enter');
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    shadow.querySelector('.gejq-query-history .gejq-star').click();
+  });
+  await page.waitForTimeout(200);
+  await query.fill('.value | length');
+  await query.press('Enter');
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const rows = shadow.querySelectorAll('.gejq-query-history .gejq-example');
+    for (const row of rows) {
+      const star = row.querySelector('.gejq-star');
+      if (star && !star.classList.contains('gejq-starred')) {
+        row.querySelector('.gejq-icon-mini').click();
+        return;
+      }
+    }
+  });
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const input = shadow.querySelector('.gejq-tag-input');
+    input.value = 'counts';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  const headings = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-query-history .gejq-help-heading')).map((h) => h.textContent);
+  });
+  check('favorites group first', headings[0] === '★ Favorites', headings.join(' | '));
+  check('tag group present', headings.includes('counts'), headings.join(' | '));
+
+  // 10j. The split between response view and panel is draggable.
+  const hostWidthBefore = await page.evaluate(() => document.getElementById('gejq-host').getBoundingClientRect().width);
+  const resizerBox = await page.locator('.gejq-resizer').boundingBox();
+  check('resizer present in embedded mode', !!resizerBox);
+  if (resizerBox) {
+    await page.mouse.move(resizerBox.x + resizerBox.width / 2, resizerBox.y + 100);
+    await page.mouse.down();
+    await page.mouse.move(resizerBox.x - 150, resizerBox.y + 100, { steps: 5 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+    const hostWidthAfter = await page.evaluate(() => document.getElementById('gejq-host').getBoundingClientRect().width);
+    check('dragging the divider widens the panel', hostWidthAfter > hostWidthBefore + 100, `${Math.round(hostWidthBefore)} → ${Math.round(hostWidthAfter)}`);
+  }
+
+  // 10k. Query input starts as tall as the language selector.
+  const inputHeights = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      input: shadow.querySelector('.gejq-query-input').getBoundingClientRect().height,
+      select: shadow.querySelector('.gejq-lang-select').getBoundingClientRect().height
+    };
+  });
+  check('query input matches language selector height', Math.abs(inputHeights.input - inputHeights.select) <= 2, JSON.stringify(inputHeights));
+
+  // 10l. Graph Explorer's own background calls are hidden behind a toggle.
+  const optionCountBefore = await page.evaluate(
+    () => document.getElementById('gejq-host').shadowRoot.querySelectorAll('.gejq-history-select option').length
+  );
+  // Internal-style call: URL not in the URI field, no run interaction.
+  await page.evaluate(() => fetch('https://graph.microsoft.com/v1.0/organization').then((r) => r.json()));
+  await page.waitForTimeout(600);
+  const bgState = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      options: shadow.querySelectorAll('.gejq-history-select option').length,
+      toggleVisible: shadow.querySelector('.gejq-bg-toggle').style.display !== 'none',
+      toggleText: shadow.querySelector('.gejq-bg-toggle').textContent
+    };
+  });
+  check('background request hidden from the response list', bgState.options === optionCountBefore, `options ${optionCountBefore} → ${bgState.options}`);
+  check('background toggle shows hidden count', bgState.toggleVisible && bgState.toggleText.includes('1'), bgState.toggleText);
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-bg-toggle').click());
+  await page.waitForTimeout(300);
+  const shownBg = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-history-select option')).map((o) => o.textContent);
+  });
+  check('toggle reveals background entry with ⚙ marker', shownBg.some((t) => t.includes('⚙') && t.includes('/v1.0/organization')), shownBg.find((t) => t.includes('⚙')));
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-bg-toggle').click());
+  await page.waitForTimeout(300);
+
+  // A deliberate run of a "background-looking" URL (via the Run button)
+  // stays visible: URI field matches + recent run interaction.
+  await page.evaluate(() => {
+    document.getElementById('ge-editor-input').value = 'https://graph.microsoft.com/v1.0/me';
+  });
+  await page.locator('#ge-run').click();
+  await page.waitForTimeout(600);
+  const meVisible = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-history-select option')).map((o) => o.textContent);
+  });
+  check(
+    'deliberately-run GET /me stays visible',
+    meVisible.some((t) => t.includes('/v1.0/me') && !t.includes('⚙')),
+    meVisible[0]
+  );
 
   // 11. Re-opening the popup within the double-click window opens Graph Explorer.
   const tabsBefore = ctx.pages().length;
