@@ -6,15 +6,18 @@ Run a Graph query, then filter, reshape, sort, and export the JSON response
 with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI's
 `--query` option — or with [JSONPath](https://github.com/JSONPath-Plus/JSONPath).
 
-## Build & test status
+<!--
+  Build/test badge for THIS branch's README. GitHub serves the README from
+  the branch you are viewing, so the badge tracks the current branch — this
+  branch's copy points at this branch. On `main`, this line reads
+  ?branch=main (…?query=branch%3Amain); update the branch name to match
+  whatever branch a copy of this README lives on.
+-->
+[![Build & tests](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml/badge.svg?branch=claude/graph-explorer-json-query-9xez2b)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml?query=branch%3Aclaude%2Fgraph-explorer-json-query-9xez2b)
 
 The **Build** workflow runs the unit tests, the offline end-to-end smoke
-test, and the packaging step on every push. Status per branch:
-
-| Branch | Build & tests |
-| --- | --- |
-| `main` | [![Build (main)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml?query=branch%3Amain) |
-| `claude/graph-explorer-json-query-9xez2b` | [![Build (claude/graph-explorer-json-query-9xez2b)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml/badge.svg?branch=claude/graph-explorer-json-query-9xez2b)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml?query=branch%3Aclaude%2Fgraph-explorer-json-query-9xez2b) |
+test, and the packaging step on every push; the badge above shows the
+status for this branch.
 
 ![The query panel embedded in Graph Explorer's results area](docs/screenshot.png)
 
