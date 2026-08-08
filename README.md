@@ -326,7 +326,6 @@ SBOM.md                Software bill of materials
 
 - Full jq builtin coverage via a WASM build of real jq (the bundled jqts
   engine covers core jq features).
-- Named saved queries shared across devices via `chrome.storage.sync`.
 
 ## License
 
