@@ -30,7 +30,6 @@
   var STORAGE_KEY_COLLAPSED = 'gejq.embedCollapsed';
   var STORAGE_KEY_FORMAT = 'gejq.exportFormat';
   var STORAGE_KEY_SPLIT = 'gejq.splitPct';
-  var STORAGE_KEY_SHOW_BG = 'gejq.showBackground';
   var STORAGE_KEY_SETTINGS = 'gejq.settings';
   var STORAGE_KEY_QUERY_HISTORY = 'gejq.queryHistory';
   var AUTO_SIGNIN_GUARD = 'gejq.autoSignInAttempted';
@@ -41,7 +40,8 @@
     autoFetchMaxPages: 50,
     autoFetchMaxMb: 10,
     queryLanguage: 'jmespath',
-    historyLimit: 50 // 0 = unlimited
+    historyLimit: 50, // 0 = unlimited
+    showBackgroundRequests: false
   });
   // The signed-out "profile view" button in Graph Explorer's top bar —
   // clicking it starts the sign-in flow.
@@ -102,9 +102,9 @@
     collapsedPref: false, // user preference: keep the embedded panel hidden
     format: 'json', // export format: 'json' | 'csv'
     splitPct: 50, // width of the embedded panel as % of the results area
-    showBackground: false, // show Graph Explorer's own background requests
     settings: normalizeSettings(null), // fresh mutable copy of the defaults
-    queryHistory: [] // executed queries, newest first (persisted)
+    queryHistory: [], // executed queries, newest first (persisted)
+    historyFilter: { text: '', sinceMs: 0, tags: [] } // panel-session only
   };
 
   var ui = null; // populated by buildUi()
@@ -252,9 +252,9 @@
 
   // ------------------------------------------------------------ query logic
 
-  /** Responses shown in the panel (background ones only when toggled on). */
+  /** Responses shown in the panel (background ones only when enabled). */
   function visibleResponses() {
-    if (state.showBackground) {
+    if (state.settings.showBackgroundRequests) {
       return state.responses;
     }
     return state.responses.filter(function (entry) {
@@ -309,25 +309,31 @@
   }
 
   /**
-   * Show the full request line of the selected response — selectable
-   * text, unlike the truncated labels inside the <select> — plus a badge
-   * saying whether the query follows the live (latest) response or is
-   * pinned to an older one.
+   * Fill the response row: a live/pinned badge plus the full request
+   * line (timestamp · METHOD url → status) as selectable text — unlike
+   * the truncated labels inside the compact <select>.
    */
   function updateResponseInfo(response) {
-    clearChildren(ui.responseInfo);
     if (!response) {
+      ui.liveBadge.style.display = 'none';
+      ui.responseText.value = '';
       return;
     }
     var live = state.followLatest;
-    var badge = el('span', 'gejq-live-badge' + (live ? ' gejq-live' : ''), live ? '● live' : 'pinned');
-    badge.title = live
+    ui.liveBadge.style.display = '';
+    ui.liveBadge.textContent = live ? '● live' : 'pinned';
+    ui.liveBadge.classList.toggle('gejq-live', live);
+    ui.liveBadge.title = live
       ? 'Following the latest response: the query re-runs automatically whenever a new Graph query executes'
-      : 'Pinned to this response — pick the newest entry in the list above to follow new responses again';
-    ui.responseInfo.appendChild(badge);
-    ui.responseInfo.appendChild(
-      el('span', 'gejq-response-url', response.method + ' ' + response.url + (response.manual ? '' : ' → ' + response.status))
-    );
+      : 'Pinned to this response — pick the newest entry in the dropdown to follow new responses again';
+    var status = response.manual ? 'pasted' : '→ ' + response.status;
+    if (response.pages) {
+      status += ' · ' + response.pages + ' pages' + (response.truncated ? ', incomplete' : '');
+    }
+    ui.responseText.value =
+      GEJQ.formatTimestamp(response.timestamp) + ' · ' + response.method + ' ' + response.url + ' ' + status +
+      (response.background ? ' · ⚙ background' : '');
+    ui.responseText.title = ui.responseText.value;
   }
 
   function runQuery() {
@@ -463,7 +469,8 @@
       autoFetchMaxPages: GEJQ.clampInt(raw && raw.autoFetchMaxPages, 1, 1000, DEFAULT_SETTINGS.autoFetchMaxPages),
       autoFetchMaxMb: GEJQ.clampInt(raw && raw.autoFetchMaxMb, 1, 50, DEFAULT_SETTINGS.autoFetchMaxMb),
       queryLanguage: raw && LANGUAGES[raw.queryLanguage] ? raw.queryLanguage : DEFAULT_SETTINGS.queryLanguage,
-      historyLimit: historyLimit
+      historyLimit: historyLimit,
+      showBackgroundRequests: !!raw && raw.showBackgroundRequests === true
     };
   }
 
@@ -618,12 +625,6 @@
     );
   }
 
-  function backgroundCount() {
-    return state.responses.filter(function (entry) {
-      return entry.background;
-    }).length;
-  }
-
   function refreshHistorySelect() {
     var select = ui.historySelect;
     var list = visibleResponses();
@@ -643,22 +644,12 @@
       var selected = selectedResponse();
       select.value = selected ? selected.id : list[0].id;
     }
-
-    // Toggle for Graph Explorer's own background requests.
-    var hidden = backgroundCount();
-    ui.backgroundToggle.style.display = hidden > 0 ? '' : 'none';
-    ui.backgroundToggle.textContent = '⚙ ' + hidden;
-    ui.backgroundToggle.classList.toggle('gejq-seg-active', state.showBackground);
-    ui.backgroundToggle.setAttribute('aria-pressed', state.showBackground ? 'true' : 'false');
-    ui.backgroundToggle.title = state.showBackground
-      ? 'Hide Graph Explorer’s own background requests (profile, organization, permissions)'
-      : hidden + ' background request(s) from Graph Explorer itself are hidden — click to show them';
   }
 
   function addResponse(entry) {
     state.responses.unshift(entry);
     state.responses = GEJQ.trimHistory(state.responses, MAX_HISTORY);
-    var visible = !entry.background || state.showBackground;
+    var visible = !entry.background || state.settings.showBackgroundRequests;
     if (state.followLatest && visible) {
       state.selectedId = entry.id;
     }
@@ -693,10 +684,10 @@
     var container = ui.suggestions;
     clearChildren(container);
     var queries = GEJQ.suggestQueries(json, state.settings.queryLanguage);
+    ui.suggestionsDetails.style.display = queries.length === 0 ? 'none' : '';
     if (queries.length === 0) {
       return;
     }
-    container.appendChild(el('div', 'gejq-help-heading', 'Suggested for this response'));
     var chipRow = el('div', 'gejq-chip-row');
     queries.slice(0, 6).forEach(function (query) {
       chipRow.appendChild(
@@ -786,7 +777,12 @@
       closeAutocomplete();
       return;
     }
-    var result = GEJQ.queryCompletions(state.settings.queryLanguage, input.value.slice(0, caret));
+    var response = selectedResponse();
+    var result = GEJQ.queryCompletions(
+      state.settings.queryLanguage,
+      input.value.slice(0, caret),
+      response && !response.tooLarge ? response.json : undefined
+    );
     if (!result) {
       closeAutocomplete();
       return;
@@ -882,11 +878,38 @@
     }
   }
 
+  function findHeadersTab() {
+    var byId = document.getElementById('request-headers');
+    if (byId) {
+      return byId;
+    }
+    var tabs = document.querySelectorAll('[role="tab"]');
+    for (var i = 0; i < tabs.length; i++) {
+      var id = (tabs[i].id || '').toLowerCase();
+      var text = (tabs[i].textContent || '').toLowerCase();
+      if (id.indexOf('header') !== -1 || text.indexOf('header') !== -1) {
+        return tabs[i];
+      }
+    }
+    return null;
+  }
+
+  function findHeaderInputs() {
+    var nameInput =
+      document.querySelector('input[name="name"]') || document.querySelector('input[placeholder="Key" i]');
+    var valueInput =
+      document.querySelector('input[name="value"]') || document.querySelector('input[placeholder="Value" i]');
+    return nameInput && valueInput ? { name: nameInput, value: valueInput } : null;
+  }
+
   /**
    * Add header rows through Graph Explorer's Request-headers tab so they
    * are visible (and persisted by GE) exactly like hand-entered ones.
-   * Best effort: silently does nothing when the tab or its inputs can't
-   * be found; each header is attempted at most once per tab session.
+   * Everything is asynchronous and defensive: the panel mounts only
+   * after the tab is clicked (polled), and the Add button stays disabled
+   * until React has processed the input values (also polled). A header
+   * is only marked done once its row is verified present, so failed
+   * attempts retry on the next occasion.
    */
   function ensureHeaderRows(rows) {
     var pending = rows.filter(function (row) {
@@ -899,7 +922,7 @@
     if (pending.length === 0) {
       return;
     }
-    var headersTab = document.getElementById('request-headers');
+    var headersTab = findHeadersTab();
     if (!headersTab) {
       return;
     }
@@ -917,45 +940,68 @@
       }
     }
 
+    /** Poll `condition` every 150ms (up to `tries`); then `action(result)`. */
+    function waitFor(condition, tries, action) {
+      var result = null;
+      try {
+        result = condition();
+      } catch (e) {
+        result = null;
+      }
+      if (result) {
+        action(result);
+      } else if (tries > 0) {
+        setTimeout(function () {
+          waitFor(condition, tries - 1, action);
+        }, 150);
+      } else {
+        finish();
+      }
+    }
+
     function addNext(index) {
       if (index >= pending.length) {
         finish();
         return;
       }
-      try {
-        var row = pending[index];
-        var nameInput = document.querySelector('input[name="name"]');
-        var valueInput = document.querySelector('input[name="value"]');
-        if (!nameInput || !valueInput) {
-          finish();
-          return;
-        }
-        var panelRoot = nameInput.closest('[role="tabpanel"]') || nameInput.parentElement.parentElement;
+      var row = pending[index];
+      waitFor(findHeaderInputs, 10, function (inputs) {
+        var panelRoot = inputs.name.closest('[role="tabpanel"]') || inputs.name.parentElement.parentElement;
         if (panelRoot && panelRoot.textContent.indexOf(row.name) !== -1) {
           markHeaderAdded(row.name); // already present
           addNext(index + 1);
           return;
         }
-        setNativeInputValue(nameInput, row.name);
-        setNativeInputValue(valueInput, row.value);
-        var addButton = findAddButton(panelRoot || document);
-        if (!addButton) {
-          finish();
-          return;
-        }
-        addButton.click();
-        markHeaderAdded(row.name);
-        setTimeout(function () {
-          addNext(index + 1);
-        }, 120);
-      } catch (e) {
-        finish(); // never break Graph Explorer
-      }
+        setNativeInputValue(inputs.name, row.name);
+        setNativeInputValue(inputs.value, row.value);
+        // The Add button enables only after React processes the values.
+        waitFor(
+          function () {
+            var addButton = findAddButton(panelRoot || document);
+            return addButton && !addButton.disabled ? addButton : null;
+          },
+          6,
+          function (addButton) {
+            addButton.click();
+            // Only mark done once the row is verified in the panel.
+            waitFor(
+              function () {
+                return panelRoot && panelRoot.textContent.indexOf(row.name) !== -1 ? true : null;
+              },
+              6,
+              function () {
+                markHeaderAdded(row.name);
+                addNext(index + 1);
+              }
+            );
+          }
+        );
+      });
     }
 
     setTimeout(function () {
       addNext(0);
-    }, 150);
+    }, 200);
   }
 
   function findAddButton(scope) {
@@ -1148,17 +1194,52 @@
     return row;
   }
 
+  /** Tag chips for the filter bar (from the full history, not filtered). */
+  function renderHistoryTagChips() {
+    var container = ui.historyTagChips;
+    clearChildren(container);
+    var tags = GEJQ.distinctTags(state.queryHistory);
+    container.style.display = tags.length === 0 ? 'none' : '';
+    tags.forEach(function (tag) {
+      var active = state.historyFilter.tags.indexOf(tag) !== -1;
+      var chip = button('gejq-chip' + (active ? ' gejq-tag-active' : ''), '#' + tag, 'Filter by this tag', function () {
+        var index = state.historyFilter.tags.indexOf(tag);
+        if (index === -1) {
+          state.historyFilter.tags.push(tag);
+        } else {
+          state.historyFilter.tags.splice(index, 1);
+        }
+        renderQueryHistory();
+      });
+      chip.setAttribute('aria-pressed', active ? 'true' : 'false');
+      container.appendChild(chip);
+    });
+  }
+
   function renderQueryHistory() {
     var container = ui.queryHistoryList;
     clearChildren(container);
-    ui.queryHistorySummary.textContent = 'Query history' + (state.queryHistory.length ? ' (' + state.queryHistory.length + ')' : '');
-    if (state.queryHistory.length === 0) {
+    renderHistoryTagChips();
+    var total = state.queryHistory.length;
+    if (total === 0) {
+      ui.queryHistorySummary.textContent = 'Query history';
+      ui.historyFilterRow.style.display = 'none';
       container.appendChild(
-        el('p', 'gejq-help-text', 'Queries you run (Enter, or clicking a suggestion) are saved here with a timestamp and the Graph request they ran against. Star ★ a query to pin it; tag 🏷 queries to group them.')
+        el('p', 'gejq-help-text', 'Queries you run (Enter, or clicking a suggestion) are saved here with a timestamp and the Graph request they ran against. Star ★ a query to pin it; tag 🏷 queries to filter by tag.')
       );
       return;
     }
-    var groups = GEJQ.groupQueryHistory(state.queryHistory);
+    ui.historyFilterRow.style.display = '';
+    var filtered = GEJQ.filterQueryHistory(state.queryHistory, state.historyFilter, Date.now());
+    var filterActive =
+      state.historyFilter.text.trim() !== '' || state.historyFilter.sinceMs > 0 || state.historyFilter.tags.length > 0;
+    ui.queryHistorySummary.textContent =
+      'Query history (' + (filterActive ? filtered.length + '/' + total : total) + ')';
+    if (filtered.length === 0) {
+      container.appendChild(el('p', 'gejq-help-text', 'No saved queries match the filter.'));
+      return;
+    }
+    var groups = GEJQ.groupQueryHistory(filtered);
     groups.forEach(function (group) {
       if (groups.length > 1 || group.title !== 'Recent') {
         container.appendChild(el('div', 'gejq-help-heading', group.title));
@@ -1468,9 +1549,21 @@
     });
     panel.appendChild(resizer);
 
+    // One row: live/pinned badge, the selected response as selectable
+    // text, and a compact dropdown to pick among captured responses.
     var historyRow = el('div', 'gejq-history-row');
+    var liveBadge = el('span', 'gejq-live-badge', '');
+    liveBadge.style.display = 'none';
+    historyRow.appendChild(liveBadge);
+    var responseText = el('input', 'gejq-response-text');
+    responseText.type = 'text';
+    responseText.readOnly = true;
+    responseText.placeholder = 'Waiting for Graph responses…';
+    responseText.title = 'The response being queried (selectable)';
+    historyRow.appendChild(responseText);
     var historySelect = el('select', 'gejq-history-select');
     historySelect.title = 'Captured Graph responses (newest first)';
+    historySelect.setAttribute('aria-label', 'Captured Graph responses');
     historySelect.addEventListener('change', function () {
       state.selectedId = historySelect.value;
       var visible = visibleResponses();
@@ -1478,21 +1571,7 @@
       runQuery();
     });
     historyRow.appendChild(historySelect);
-    var backgroundToggle = button('gejq-bg-toggle', '⚙ 0', '', function () {
-      state.showBackground = !state.showBackground;
-      storageSet(STORAGE_KEY_SHOW_BG, state.showBackground);
-      refreshHistorySelect();
-      updateBadge();
-      runQuery();
-    });
-    backgroundToggle.style.display = 'none';
-    historyRow.appendChild(backgroundToggle);
     panel.appendChild(historyRow);
-
-    // Full request line of the selected response: selectable, with a
-    // live/pinned indicator.
-    var responseInfo = el('div', 'gejq-response-info');
-    panel.appendChild(responseInfo);
 
     // Top half of the split: the query input with the language selector.
     var queryRow = el('div', 'gejq-query-row');
@@ -1571,14 +1650,52 @@
     var resultOutput = el('div', 'gejq-result');
     panel.appendChild(resultOutput);
 
+    // Suggestions (collapsible, open by default)
+    var suggestionsDetails = el('details', 'gejq-help gejq-suggestions-details');
+    suggestionsDetails.open = true;
+    suggestionsDetails.appendChild(el('summary', null, 'Suggested for this response'));
     var suggestions = el('div', 'gejq-suggestions');
-    panel.appendChild(suggestions);
+    suggestionsDetails.appendChild(suggestions);
+    suggestionsDetails.style.display = 'none';
+    panel.appendChild(suggestionsDetails);
 
-    // Query history (persisted, newest first)
+    // Query history (persisted, newest first) with a filter bar.
     var queryHistoryDetails = el('details', 'gejq-help');
     var queryHistorySummary = el('summary', null, 'Query history');
     queryHistoryDetails.appendChild(queryHistorySummary);
     var queryHistoryBody = el('div', 'gejq-help-body');
+
+    var historyFilterRow = el('div', 'gejq-hist-filter');
+    var historyFilterText = el('input', 'gejq-hist-filter-text');
+    historyFilterText.type = 'search';
+    historyFilterText.placeholder = 'Filter queries…';
+    historyFilterText.addEventListener('input', function () {
+      state.historyFilter.text = historyFilterText.value;
+      renderQueryHistory();
+    });
+    historyFilterRow.appendChild(historyFilterText);
+    var historyFilterTime = el('select', 'gejq-hist-filter-time');
+    historyFilterTime.title = 'Only queries used within…';
+    [
+      { label: 'Any time', ms: 0 },
+      { label: 'Last hour', ms: 60 * 60 * 1000 },
+      { label: 'Last 24 h', ms: 24 * 60 * 60 * 1000 },
+      { label: 'Last 7 days', ms: 7 * 24 * 60 * 60 * 1000 },
+      { label: 'Last 30 days', ms: 30 * 24 * 60 * 60 * 1000 }
+    ].forEach(function (choice) {
+      var option = el('option', null, choice.label);
+      option.value = String(choice.ms);
+      historyFilterTime.appendChild(option);
+    });
+    historyFilterTime.addEventListener('change', function () {
+      state.historyFilter.sinceMs = parseInt(historyFilterTime.value, 10) || 0;
+      renderQueryHistory();
+    });
+    historyFilterRow.appendChild(historyFilterTime);
+    queryHistoryBody.appendChild(historyFilterRow);
+    var historyTagChips = el('div', 'gejq-chip-row gejq-hist-tags');
+    queryHistoryBody.appendChild(historyTagChips);
+
     var queryHistoryList = el('div', 'gejq-query-history');
     queryHistoryBody.appendChild(queryHistoryList);
     queryHistoryBody.appendChild(
@@ -1674,8 +1791,8 @@
       panel: panel,
       titleLabel: titleLabel,
       historySelect: historySelect,
-      backgroundToggle: backgroundToggle,
-      responseInfo: responseInfo,
+      liveBadge: liveBadge,
+      responseText: responseText,
       queryInput: queryInput,
       autocompleteList: autocompleteList,
       error: error,
@@ -1683,11 +1800,14 @@
       meta: meta,
       resultOutput: resultOutput,
       suggestions: suggestions,
+      suggestionsDetails: suggestionsDetails,
       languageSelect: languageSelect,
       helpSummary: helpSummary,
       helpBody: helpBody,
       queryHistoryList: queryHistoryList,
       queryHistorySummary: queryHistorySummary,
+      historyFilterRow: historyFilterRow,
+      historyTagChips: historyTagChips,
       copyButton: copyButton,
       downloadButton: downloadButton,
       jsonToggle: jsonToggle,
@@ -1779,12 +1899,11 @@
       })
       .then(function (css) {
         storageGet(
-          [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FORMAT, STORAGE_KEY_SPLIT, STORAGE_KEY_SHOW_BG, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
+          [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FORMAT, STORAGE_KEY_SPLIT, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
           function (items) {
             state.collapsedPref = items[STORAGE_KEY_COLLAPSED] === true;
             state.format = items[STORAGE_KEY_FORMAT] === 'csv' ? 'csv' : 'json';
             state.splitPct = GEJQ.clampInt(items[STORAGE_KEY_SPLIT], 15, 85, 50);
-            state.showBackground = items[STORAGE_KEY_SHOW_BG] === true;
             state.settings = normalizeSettings(items[STORAGE_KEY_SETTINGS]);
             state.queryHistory = Array.isArray(items[STORAGE_KEY_QUERY_HISTORY])
               ? items[STORAGE_KEY_QUERY_HISTORY]
@@ -1808,8 +1927,14 @@
           return;
         }
         var previousLanguage = state.settings.queryLanguage;
+        var previousShowBackground = state.settings.showBackgroundRequests;
         state.settings = normalizeSettings(changes[STORAGE_KEY_SETTINGS].newValue);
         pushSettingsToPage();
+        if (ui && state.settings.showBackgroundRequests !== previousShowBackground) {
+          refreshHistorySelect();
+          updateBadge();
+          runQuery();
+        }
         // A lowered history limit trims the stored history right away
         // (favorites are exempt).
         var limit = state.settings.historyLimit;

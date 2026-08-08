@@ -387,20 +387,10 @@
     ]
   };
 
-  /**
-   * Tier-1 completion: match the identifier fragment before the cursor
-   * against the language's function/keyword list. Returns
-   * { replaceFrom, fragment, items } or null (no fragment, no matches,
-   * or the cursor is inside a string literal).
-   */
-  function queryCompletions(language, textBeforeCursor) {
-    var entries = QUERY_COMPLETIONS[language];
-    if (!entries || typeof textBeforeCursor !== 'string') {
-      return null;
-    }
+  function insideStringLiteral(text) {
     var quote = null;
-    for (var i = 0; i < textBeforeCursor.length; i++) {
-      var ch = textBeforeCursor[i];
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
       if (quote) {
         if (ch === '\\') {
           i++;
@@ -411,19 +401,148 @@
         quote = ch;
       }
     }
-    if (quote !== null) {
-      return null; // inside a string literal
+    return quote !== null;
+  }
+
+  // Characters that can be part of a path expression; anything else ends
+  // the candidate scanned backwards from the cursor.
+  var PATH_CHARS = /[A-Za-z0-9_.\[\]"'@:$*-]/;
+
+  /** The trailing path-like run before the cursor (quotes skipped whole). */
+  function extractPathCandidate(text) {
+    var i = text.length - 1;
+    while (i >= 0) {
+      var ch = text[i];
+      if (ch === '"' || ch === "'") {
+        // Skip a complete quoted span (the caller already ruled out an
+        // unterminated string at the cursor).
+        var j = i - 1;
+        while (j >= 0 && !(text[j] === ch && text[j - 1] !== '\\')) {
+          j--;
+        }
+        if (j < 0) {
+          break;
+        }
+        i = j - 1;
+      } else if (PATH_CHARS.test(ch)) {
+        i--;
+      } else {
+        break;
+      }
     }
-    var fragmentMatch = /[A-Za-z_][A-Za-z0-9_]*$/.exec(textBeforeCursor);
-    if (!fragmentMatch) {
+    return text.slice(i + 1);
+  }
+
+  /** Resolve parsed path segments against a JSON value → array of values. */
+  function resolveSegments(json, segments) {
+    var current = [json];
+    for (var s = 0; s < segments.length; s++) {
+      var segment = segments[s];
+      var next = [];
+      for (var c = 0; c < current.length && next.length < 20; c++) {
+        var value = current[c];
+        if (segment.type === 'key') {
+          if (value !== null && typeof value === 'object' && !Array.isArray(value) && segment.name in value) {
+            next.push(value[segment.name]);
+          }
+        } else if (segment.type === 'index') {
+          if (Array.isArray(value)) {
+            var idx = segment.value < 0 ? value.length + segment.value : segment.value;
+            if (idx >= 0 && idx < value.length) {
+              next.push(value[idx]);
+            }
+          }
+        } else if (Array.isArray(value)) {
+          // wildcard, slice, filter: sample the items (shape only)
+          for (var v = 0; v < value.length && next.length < 20; v++) {
+            next.push(value[v]);
+          }
+        }
+      }
+      if (next.length === 0) {
+        return [];
+      }
+      current = next;
+    }
+    return current;
+  }
+
+  function valueDetail(value) {
+    if (Array.isArray(value)) {
+      return 'array (' + value.length + ')';
+    }
+    if (value === null) {
+      return 'null';
+    }
+    return typeof value;
+  }
+
+  /**
+   * Tier-2 completion: property names from the response JSON at the path
+   * before the cursor (e.g. `value[].` → displayName, mail, …).
+   */
+  function propertyCompletions(language, textBeforeCursor, json) {
+    if (json === undefined || json === null) {
       return null;
     }
-    var fragment = fragmentMatch[0];
+    var candidate = extractPathCandidate(textBeforeCursor);
+    var fragmentMatch = /[A-Za-z_][A-Za-z0-9_]*$/.exec(candidate);
+    var fragment = fragmentMatch ? fragmentMatch[0] : '';
+    var base = candidate.slice(0, candidate.length - fragment.length);
+    if (base.slice(-1) === '.') {
+      base = base.slice(0, -1);
+    } else if (base !== '') {
+      return null; // not a member position (after ']', inside a filter, …)
+    }
+    var values;
+    if (language === 'jq') {
+      if (candidate[0] !== '.') {
+        return null;
+      }
+      values = base === '' || base === '.' ? [json] : resolveFromParser(parseJqQuery, base, json);
+    } else if (language === 'jsonpath') {
+      if (candidate[0] !== '$') {
+        return null;
+      }
+      values = base === '' || base === '$' ? [json] : resolveFromParser(parseJsonPathQuery, base, json);
+    } else if (language === 'jmespath') {
+      if (candidate[0] === '$' || candidate[0] === '.') {
+        return null;
+      }
+      values = base === '' ? [json] : resolveFromParser(parseJmesPathQuery, base, json);
+    } else {
+      return null;
+    }
+    if (!values || values.length === 0) {
+      return null;
+    }
     var lower = fragment.toLowerCase();
-    var items = entries.filter(function (entry) {
-      var key = (entry.match || entry.label).toLowerCase();
-      return key.indexOf(lower) === 0 && key !== lower;
-    });
+    var seen = {};
+    var items = [];
+    for (var i = 0; i < values.length && items.length < 30; i++) {
+      var value = values[i];
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        continue;
+      }
+      var keys = Object.keys(value);
+      for (var k = 0; k < keys.length && items.length < 30; k++) {
+        var key = keys[k];
+        var keyLower = key.toLowerCase();
+        if (seen[keyLower] || keyLower.indexOf(lower) !== 0 || keyLower === lower) {
+          continue;
+        }
+        var plain = PLAIN_IDENTIFIER.test(key);
+        if (!plain && language === 'jsonpath') {
+          continue; // needs bracket syntax, which a dot-completion can't insert
+        }
+        seen[keyLower] = true;
+        items.push({
+          label: key,
+          insert: plain ? key : '"' + key.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"',
+          detail: valueDetail(value[key])
+        });
+      }
+    }
     if (items.length === 0) {
       return null;
     }
@@ -432,6 +551,62 @@
       fragment: fragment,
       items: items
     };
+  }
+
+  function resolveFromParser(parser, base, json) {
+    var model;
+    try {
+      model = parser(base);
+    } catch (e) {
+      model = null;
+    }
+    if (!model || model.count) {
+      return null;
+    }
+    return resolveSegments(json, model.segments);
+  }
+
+  /**
+   * Query-input completion. Tier 2 (property names resolved from the
+   * response JSON at the path before the cursor) ranks first, followed
+   * by Tier 1 (the language's functions and operators). Returns
+   * { replaceFrom, fragment, items } or null (no matches, or the cursor
+   * is inside a string literal).
+   */
+  function queryCompletions(language, textBeforeCursor, json) {
+    if (typeof textBeforeCursor !== 'string' || insideStringLiteral(textBeforeCursor)) {
+      return null;
+    }
+    var properties = propertyCompletions(language, textBeforeCursor, json);
+
+    var functions = null;
+    var entries = QUERY_COMPLETIONS[language];
+    var fragmentMatch = /[A-Za-z_][A-Za-z0-9_]*$/.exec(textBeforeCursor);
+    if (entries && fragmentMatch) {
+      var fragment = fragmentMatch[0];
+      var lower = fragment.toLowerCase();
+      var items = entries.filter(function (entry) {
+        var key = (entry.match || entry.label).toLowerCase();
+        return key.indexOf(lower) === 0 && key !== lower;
+      });
+      if (items.length > 0) {
+        functions = {
+          replaceFrom: textBeforeCursor.length - fragment.length,
+          fragment: fragment,
+          items: items
+        };
+      }
+    }
+
+    if (properties && functions) {
+      // Same fragment by construction — merge with properties first.
+      return {
+        replaceFrom: properties.replaceFrom,
+        fragment: properties.fragment,
+        items: properties.items.concat(functions.items)
+      };
+    }
+    return properties || functions;
   }
 
   // ----------------------------------------------------- query conversion
@@ -1153,45 +1328,87 @@
   }
 
   /**
-   * Group the query history for display: favorites first, then one group
-   * per tag (alphabetical; an unstarred entry goes under its first tag),
-   * then the untagged rest under "Recent". Order inside each group stays
+   * Group the query history for display: favorites pinned first, the
+   * rest under "Recent" (tags are shown per entry and used for
+   * filtering, not grouping). Order inside each group stays
    * newest-first. Returns [{ title, items }] with empty groups omitted.
    */
   function groupQueryHistory(list) {
     var favorites = [];
-    var tagGroups = {};
     var recent = [];
     (Array.isArray(list) ? list : []).forEach(function (item) {
       if (!item) {
         return;
       }
-      if (item.starred) {
-        favorites.push(item);
-        return;
-      }
-      var tag = Array.isArray(item.tags) && item.tags.length > 0 ? String(item.tags[0]) : null;
-      if (tag) {
-        (tagGroups[tag] = tagGroups[tag] || []).push(item);
-      } else {
-        recent.push(item);
-      }
+      (item.starred ? favorites : recent).push(item);
     });
     var groups = [];
     if (favorites.length > 0) {
       groups.push({ title: '★ Favorites', items: favorites });
     }
-    Object.keys(tagGroups)
-      .sort(function (a, b) {
-        return a.localeCompare(b);
-      })
-      .forEach(function (tag) {
-        groups.push({ title: tag, items: tagGroups[tag] });
-      });
     if (recent.length > 0) {
       groups.push({ title: 'Recent', items: recent });
     }
     return groups;
+  }
+
+  /** Distinct tags across the history, alphabetical. */
+  function distinctTags(list) {
+    var seen = {};
+    var out = [];
+    (Array.isArray(list) ? list : []).forEach(function (item) {
+      (item && Array.isArray(item.tags) ? item.tags : []).forEach(function (tag) {
+        if (!seen[tag]) {
+          seen[tag] = true;
+          out.push(tag);
+        }
+      });
+    });
+    return out.sort(function (a, b) {
+      return a.localeCompare(b);
+    });
+  }
+
+  /**
+   * Filter the query history. `filter` supports:
+   *  - text: case-insensitive substring over query, language, tags, and
+   *    the recorded request (method + URL)
+   *  - sinceMs: only entries used within the last N milliseconds
+   *  - tags: entries carrying ALL of the given tags
+   * Order is preserved.
+   */
+  function filterQueryHistory(list, filter, now) {
+    var text = ((filter && filter.text) || '').trim().toLowerCase();
+    var tags = (filter && filter.tags) || [];
+    var cutoff = filter && filter.sinceMs > 0 && typeof now === 'number' ? now - filter.sinceMs : 0;
+    return (Array.isArray(list) ? list : []).filter(function (item) {
+      if (!item) {
+        return false;
+      }
+      if (cutoff && !(item.lastUsed >= cutoff)) {
+        return false;
+      }
+      var itemTags = Array.isArray(item.tags) ? item.tags : [];
+      for (var t = 0; t < tags.length; t++) {
+        if (itemTags.indexOf(tags[t]) === -1) {
+          return false;
+        }
+      }
+      if (text) {
+        var haystack = [
+          item.query,
+          item.language,
+          itemTags.join(' '),
+          item.context ? item.context.method + ' ' + item.context.url : ''
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (haystack.indexOf(text) === -1) {
+          return false;
+        }
+      }
+      return true;
+    });
   }
 
   /** "14:32:05" for today, "2026-08-06 14:32" for older timestamps. */
@@ -1398,6 +1615,8 @@
     upsertQueryHistory: upsertQueryHistory,
     trimQueryHistoryList: trimQueryHistoryList,
     groupQueryHistory: groupQueryHistory,
+    distinctTags: distinctTags,
+    filterQueryHistory: filterQueryHistory,
     formatTimestamp: formatTimestamp,
     csvEligible: csvEligible,
     exportFilename: exportFilename,

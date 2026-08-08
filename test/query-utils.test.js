@@ -376,19 +376,74 @@ test('trimQueryHistoryList removes oldest unstarred entries first', () => {
   assert.equal(GEJQ.trimQueryHistoryList(entries, 0), entries);
 });
 
-test('groupQueryHistory orders favorites, tag groups, then recent', () => {
+test('groupQueryHistory pins favorites, keeps the rest in order', () => {
   const groups = GEJQ.groupQueryHistory([
     { query: 'newest', starred: false, tags: [] },
     { query: 'tagged-b', starred: false, tags: ['beta'] },
-    { query: 'fav', starred: true, tags: ['ignored-when-starred'] },
+    { query: 'fav', starred: true, tags: ['kept-not-grouped'] },
     { query: 'tagged-a', starred: false, tags: ['alpha', 'second'] },
     { query: 'old', starred: false }
   ]);
-  assert.deepEqual(groups.map((g) => g.title), ['★ Favorites', 'alpha', 'beta', 'Recent']);
+  assert.deepEqual(groups.map((g) => g.title), ['★ Favorites', 'Recent']);
   assert.deepEqual(groups[0].items.map((i) => i.query), ['fav']);
-  assert.deepEqual(groups[1].items.map((i) => i.query), ['tagged-a']);
-  assert.deepEqual(groups[3].items.map((i) => i.query), ['newest', 'old']);
+  assert.deepEqual(groups[1].items.map((i) => i.query), ['newest', 'tagged-b', 'tagged-a', 'old']);
   assert.deepEqual(GEJQ.groupQueryHistory([]), []);
+});
+
+test('filterQueryHistory filters by text, time, and tags (AND)', () => {
+  const NOW = 1000000000;
+  const HOUR = 60 * 60 * 1000;
+  const history = [
+    { query: 'value[].displayName', language: 'jmespath', lastUsed: NOW - HOUR / 2, tags: ['users'], context: { method: 'GET', url: 'https://graph.microsoft.com/v1.0/users' } },
+    { query: '.value | length', language: 'jq', lastUsed: NOW - 3 * HOUR, tags: ['users', 'counts'], context: null },
+    { query: '$.value[*].subject', language: 'jsonpath', lastUsed: NOW - 48 * HOUR, tags: [], context: { method: 'GET', url: 'https://graph.microsoft.com/v1.0/me/messages' } }
+  ];
+  assert.equal(GEJQ.filterQueryHistory(history, {}, NOW).length, 3);
+  assert.deepEqual(GEJQ.filterQueryHistory(history, { text: 'messages' }, NOW).map((i) => i.language), ['jsonpath']);
+  assert.deepEqual(GEJQ.filterQueryHistory(history, { text: 'LENGTH' }, NOW).map((i) => i.language), ['jq']);
+  assert.deepEqual(GEJQ.filterQueryHistory(history, { sinceMs: HOUR }, NOW).map((i) => i.language), ['jmespath']);
+  assert.deepEqual(GEJQ.filterQueryHistory(history, { tags: ['users'] }, NOW).length, 2);
+  assert.deepEqual(GEJQ.filterQueryHistory(history, { tags: ['users', 'counts'] }, NOW).map((i) => i.language), ['jq']);
+  assert.equal(GEJQ.filterQueryHistory(history, { text: 'users', tags: ['counts'], sinceMs: 4 * HOUR }, NOW).length, 1);
+  assert.equal(GEJQ.filterQueryHistory(history, { text: 'nope' }, NOW).length, 0);
+});
+
+test('distinctTags collects unique tags alphabetically', () => {
+  assert.deepEqual(
+    GEJQ.distinctTags([{ tags: ['zeta', 'users'] }, { tags: ['users'] }, { tags: [] }, {}]),
+    ['users', 'zeta']
+  );
+});
+
+test('property completions resolve keys from the response JSON', () => {
+  const jmes = GEJQ.queryCompletions('jmespath', 'value[].disp', SAMPLE_USERS_RESPONSE);
+  assert.ok(jmes.items.some((i) => i.label === 'displayName' && i.insert === 'displayName'));
+
+  const afterDot = GEJQ.queryCompletions('jmespath', 'value[].', SAMPLE_USERS_RESPONSE);
+  assert.ok(afterDot.items.map((i) => i.label).includes('mail'));
+  assert.equal(afterDot.replaceFrom, 'value[].'.length);
+
+  const root = GEJQ.queryCompletions('jmespath', 'val', SAMPLE_USERS_RESPONSE);
+  assert.ok(root.items.some((i) => i.label === 'value' && i.detail.startsWith('array')));
+  assert.ok(root.items.some((i) => i.label === 'values(')); // Tier-1 merged after properties
+  assert.ok(root.items.findIndex((i) => i.label === 'value') < root.items.findIndex((i) => i.label === 'values('));
+
+  const jq = GEJQ.queryCompletions('jq', '.value[].m', SAMPLE_USERS_RESPONSE);
+  assert.ok(jq.items.some((i) => i.label === 'mail'));
+
+  const jqRoot = GEJQ.queryCompletions('jq', '.', SAMPLE_USERS_RESPONSE);
+  assert.ok(jqRoot.items.some((i) => i.label === 'value'));
+  assert.ok(jqRoot.items.some((i) => i.label === '@odata.context' && i.insert === '"@odata.context"'));
+
+  const jsonpath = GEJQ.queryCompletions('jsonpath', '$.value[*].j', SAMPLE_USERS_RESPONSE);
+  assert.ok(jsonpath.items.some((i) => i.label === 'jobTitle'));
+
+  // No property completion right after a bracket (would be invalid syntax).
+  assert.equal(GEJQ.queryCompletions('jmespath', 'value[]', SAMPLE_USERS_RESPONSE), null);
+  // Unresolvable paths yield no property items.
+  assert.equal(GEJQ.queryCompletions('jmespath', 'nosuch.', SAMPLE_USERS_RESPONSE), null);
+  // Without JSON, Tier-1 still works.
+  assert.ok(GEJQ.queryCompletions('jmespath', 'sor').items.length >= 2);
 });
 
 test('queryCompletions matches identifier fragments per language', () => {
