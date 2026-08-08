@@ -100,7 +100,12 @@
     embedded: false, // panel currently lives inside #response-area
     open: false, // panel visible (embedded: expanded; floating: drawer open)
     collapsedPref: false, // user preference: keep the embedded panel hidden
-    format: 'json', // export format: 'json' | 'csv'
+    format: 'json', // result view + export format: 'json' | 'csv' | 'tree'
+    tableSort: { column: null, dir: 1 }, // table-view sorting (csv mode)
+    lastValue: undefined, // last successful query result (sort re-render)
+    lastRenderKey: '', // response id + query — resets table sorting
+    diff: { active: false, baseId: null }, // compare-mode state
+    diffText: '', // exportable text of the last rendered diff
     splitPct: 50, // width of the embedded panel as % of the results area
     settings: normalizeSettings(null), // fresh mutable copy of the defaults
     queryHistory: [], // executed queries, newest first (persisted)
@@ -203,32 +208,212 @@
     container.appendChild(fragment);
   }
 
+  var TABLE_ROW_LIMIT = 1000;
+  var TREE_CHILD_LIMIT = 200;
+
+  /** Rows in the order the table currently shows them (sorting applied). */
+  function sortedTableRows(value) {
+    var shape = GEJQ.csvShape(value);
+    if (shape === null || state.tableSort.column === null) {
+      return value;
+    }
+    return GEJQ.sortRows(value, shape === 'objects' ? state.tableSort.column : null, state.tableSort.dir);
+  }
+
+  function cellText(cell) {
+    if (cell === null || cell === undefined) {
+      return '';
+    }
+    var text = typeof cell === 'object' ? JSON.stringify(cell) : String(cell);
+    return text.length > 200 ? text.slice(0, 200) + '…' : text;
+  }
+
+  /** Sortable table for CSV mode; header clicks toggle the sort. */
+  function renderTable(output, value) {
+    var shape = GEJQ.csvShape(value);
+    var columns = shape === 'objects' ? GEJQ.csvColumns(value) : ['value'];
+    var rows = sortedTableRows(value);
+    var scroller = el('div', 'gejq-table-scroll');
+    var table = el('table', 'gejq-table');
+    var head = el('thead');
+    var headRow = el('tr');
+    columns.forEach(function (column) {
+      var sortColumn = shape === 'objects' ? column : null;
+      var active = state.tableSort.column === (sortColumn === null ? 'value' : sortColumn);
+      var th = el('th');
+      var sortButton = button(
+        'gejq-th-button' + (active ? ' gejq-th-active' : ''),
+        column + (active ? (state.tableSort.dir === 1 ? ' ▲' : ' ▼') : ''),
+        'Sort by ' + column,
+        function () {
+          var key = sortColumn === null ? 'value' : sortColumn;
+          if (state.tableSort.column === key) {
+            state.tableSort.dir = -state.tableSort.dir;
+          } else {
+            state.tableSort = { column: key, dir: 1 };
+          }
+          if (state.lastValue !== undefined) {
+            renderResult(state.lastValue);
+          }
+        }
+      );
+      th.appendChild(sortButton);
+      headRow.appendChild(th);
+    });
+    head.appendChild(headRow);
+    table.appendChild(head);
+    var body = el('tbody');
+    rows.slice(0, TABLE_ROW_LIMIT).forEach(function (row) {
+      var tr = el('tr');
+      if (shape === 'objects') {
+        columns.forEach(function (column) {
+          tr.appendChild(el('td', null, cellText(row[column])));
+        });
+      } else {
+        tr.appendChild(el('td', null, cellText(row)));
+      }
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    scroller.appendChild(table);
+    if (rows.length > TABLE_ROW_LIMIT) {
+      output.appendChild(
+        el('div', 'gejq-notice', 'Showing the first ' + TABLE_ROW_LIMIT + ' of ' + rows.length + ' rows — Copy/Download export all of them (sorted).')
+      );
+    }
+    output.appendChild(scroller);
+  }
+
+  /** Interactive JSON tree: clicking a property builds the path query. */
+  function renderTree(output, value) {
+    var language = state.settings.queryLanguage;
+    var baseQuery = state.query.trim();
+
+    function preview(val) {
+      if (val === null) {
+        return 'null';
+      }
+      if (Array.isArray(val)) {
+        return '[' + val.length + ']';
+      }
+      if (typeof val === 'object') {
+        return '{' + Object.keys(val).length + '}';
+      }
+      var text = typeof val === 'string' ? '"' + val + '"' : String(val);
+      return text.length > 80 ? text.slice(0, 80) + '…' : text;
+    }
+
+    function wildcardized(segments) {
+      return segments.map(function (segment) {
+        return segment.type === 'index' ? { type: 'wildcard' } : segment;
+      });
+    }
+
+    function childEntries(val) {
+      if (Array.isArray(val)) {
+        return val.slice(0, TREE_CHILD_LIMIT).map(function (item, index) {
+          return { label: '[' + index + ']', segment: { type: 'index', value: index }, value: item };
+        });
+      }
+      return Object.keys(val)
+        .slice(0, TREE_CHILD_LIMIT)
+        .map(function (key) {
+          return { label: key, segment: { type: 'key', name: key }, value: val[key] };
+        });
+    }
+
+    function renderChildren(container, val, segments, depth) {
+      childEntries(val).forEach(function (entry) {
+        container.appendChild(nodeRow(entry, segments, depth));
+      });
+      var total = Array.isArray(val) ? val.length : Object.keys(val).length;
+      if (total > TREE_CHILD_LIMIT) {
+        container.appendChild(el('div', 'gejq-tree-more', '… ' + (total - TREE_CHILD_LIMIT) + ' more (showing first ' + TREE_CHILD_LIMIT + ')'));
+      }
+    }
+
+    function nodeRow(entry, parentSegments, depth) {
+      var segments = parentSegments.concat([entry.segment]);
+      var wrap = el('div');
+      var row = el('div', 'gejq-tree-row');
+      row.style.paddingLeft = depth * 14 + 'px';
+      var expandable = entry.value !== null && typeof entry.value === 'object' &&
+        (Array.isArray(entry.value) ? entry.value.length > 0 : Object.keys(entry.value).length > 0);
+      var childrenBox = null;
+      var toggle = el('span', 'gejq-tree-toggle', expandable ? '▸' : ' ');
+      if (expandable) {
+        toggle.addEventListener('click', function () {
+          if (childrenBox === null) {
+            childrenBox = el('div');
+            renderChildren(childrenBox, entry.value, segments, depth + 1);
+            wrap.appendChild(childrenBox);
+            toggle.textContent = '▾';
+          } else {
+            childrenBox.style.display = childrenBox.style.display === 'none' ? '' : 'none';
+            toggle.textContent = childrenBox.style.display === 'none' ? '▸' : '▾';
+          }
+        });
+      }
+      row.appendChild(toggle);
+      var path = GEJQ.pathQuery(language, wildcardized(segments));
+      var query = null;
+      if (path !== null) {
+        if (baseQuery === '') {
+          query = path;
+        } else if (language === 'jmespath' || language === 'jq') {
+          // The tree shows the current query's result, so pipe the path onto it.
+          query = baseQuery + ' | ' + path;
+        }
+      }
+      if (query !== null) {
+        row.appendChild(
+          button('gejq-tree-key', entry.label, 'Use as query: ' + query, function () {
+            setQuery(query);
+          })
+        );
+      } else {
+        row.appendChild(el('span', 'gejq-tree-key-plain', entry.label));
+      }
+      row.appendChild(el('span', 'gejq-tree-preview', preview(entry.value)));
+      wrap.appendChild(row);
+      return wrap;
+    }
+
+    var root = el('div', 'gejq-tree');
+    if (value === null || typeof value !== 'object') {
+      root.appendChild(el('div', 'gejq-empty', 'The result is a scalar — nothing to expand. Value: ' + preview(value)));
+    } else {
+      root.appendChild(el('div', 'gejq-tree-hint', 'Click a property to use its path as the query.'));
+      renderChildren(root, value, [], 0);
+    }
+    output.appendChild(root);
+  }
+
   /**
-   * Render the query result in the result area. In CSV export mode the
-   * output view shows the CSV text itself (when the result is CSV-able);
-   * otherwise pretty-printed JSON. Returns 'csv' or 'json' accordingly.
+   * Render the query result: sortable table in CSV mode (when the result
+   * is CSV-able), interactive tree in Tree mode, otherwise pretty JSON.
+   * Returns { mode, size } — size is the serialized length.
    */
   function renderResult(value) {
     var output = ui.resultOutput;
     clearChildren(output);
     if (value === undefined) {
       output.appendChild(el('div', 'gejq-empty', 'The query returned no result (undefined).'));
-      return 'json';
+      return { mode: 'json', size: 0 };
     }
-    var mode = 'json';
-    var text = null;
-    if (state.format === 'csv') {
-      text = GEJQ.toCsv(value);
-      if (text !== null) {
-        mode = 'csv';
-      }
+    var serialized = JSON.stringify(value, null, 2);
+    if (typeof serialized !== 'string') {
+      serialized = String(value);
     }
-    if (mode === 'json') {
-      text = JSON.stringify(value, null, 2);
-      if (typeof text !== 'string') {
-        text = String(value);
-      }
+    if (state.format === 'csv' && GEJQ.csvEligible(value)) {
+      renderTable(output, value);
+      return { mode: 'csv', size: serialized.length };
     }
+    if (state.format === 'tree') {
+      renderTree(output, value);
+      return { mode: 'tree', size: serialized.length };
+    }
+    var text = serialized;
     if (text.length > RENDER_LIMIT) {
       output.appendChild(
         el(
@@ -238,16 +423,16 @@
         )
       );
       output.appendChild(el('pre', 'gejq-json', text.slice(0, RENDER_LIMIT) + '\n…'));
-      return mode;
+      return { mode: 'json', size: text.length };
     }
     var pre = el('pre', 'gejq-json');
-    if (mode === 'csv' || text.length > HIGHLIGHT_LIMIT) {
+    if (text.length > HIGHLIGHT_LIMIT) {
       pre.textContent = text;
     } else {
       appendHighlightedJson(pre, text);
     }
     output.appendChild(pre);
-    return mode;
+    return { mode: 'json', size: text.length };
   }
 
   // ------------------------------------------------------------ query logic
@@ -304,7 +489,8 @@
     try {
       return { value: executeQuery(response.json, query), error: null };
     } catch (e) {
-      return { value: undefined, error: e && e.message ? e.message : String(e) };
+      var label = LANGUAGES[state.settings.queryLanguage].label;
+      return { value: undefined, error: label + ': ' + (e && e.message ? e.message : String(e)) };
     }
   }
 
@@ -336,14 +522,22 @@
     ui.responseText.title = ui.responseText.value;
   }
 
+  /** Set the warning line (also drops any live auto-fetch progress). */
+  function setWarning(text) {
+    ui.warning.removeAttribute('data-progress');
+    ui.warning.textContent = text;
+  }
+
   function runQuery() {
     var response = selectedResponse();
     updateResponseInfo(response);
+    syncTheme();
 
     if (!response) {
       ui.error.textContent = '';
-      ui.warning.textContent = '';
+      setWarning('');
       ui.meta.textContent = '';
+      ui.metaRight.textContent = '';
       clearChildren(ui.resultOutput);
       ui.resultOutput.appendChild(
         el(
@@ -360,8 +554,9 @@
 
     if (response.tooLarge) {
       ui.error.textContent = '';
-      ui.warning.textContent = '';
+      setWarning('');
       ui.meta.textContent = '';
+      ui.metaRight.textContent = '';
       clearChildren(ui.resultOutput);
       ui.resultOutput.appendChild(
         el(
@@ -374,9 +569,11 @@
       return;
     }
 
-    ui.warning.textContent = response.truncated
-      ? '⚠ Auto-fetch stopped early: only ' + response.pages + ' pages (' + GEJQ.formatBytes(response.size) + ') were fetched before hitting the configured limit — this dataset is incomplete. Raise the auto-fetch limits in the extension settings to fetch more.'
-      : '';
+    setWarning(
+      response.truncated
+        ? '⚠ Auto-fetch stopped early: only ' + response.pages + ' pages (' + GEJQ.formatBytes(response.size) + ') were fetched before hitting the configured limit — this dataset is incomplete. Raise the auto-fetch limits in the extension settings to fetch more.'
+        : ''
+    );
 
     // Suggestions depend on the response and language, not on the query —
     // refresh them even when the current query errors (e.g. right after
@@ -390,9 +587,88 @@
       return; // keep previous result visible while the user types
     }
     ui.error.textContent = '';
-    var viewMode = renderResult(outcome.value);
-    ui.meta.textContent = GEJQ.describeResult(outcome.value) + (viewMode === 'csv' ? ' · CSV view' : '');
+    state.lastValue = outcome.value;
+    var renderKey = response.id + '|' + state.query;
+    if (renderKey !== state.lastRenderKey) {
+      state.lastRenderKey = renderKey;
+      state.tableSort = { column: null, dir: 1 }; // new data → reset sorting
+    }
+    if (state.diff.active) {
+      renderDiffView(response, outcome.value);
+      updateExportButtons(outcome);
+      return;
+    }
+    var rendered = renderResult(outcome.value);
+    ui.meta.textContent =
+      GEJQ.describeResult(outcome.value) +
+      (rendered.mode === 'csv' ? ' · table view' : rendered.mode === 'tree' ? ' · tree view' : '');
+    ui.metaRight.textContent = lengthLabel(outcome.value, rendered.size);
     updateExportButtons(outcome);
+  }
+
+  /** "length: 13 · 4.2 KB" readout for the top-right of the results. */
+  function lengthLabel(value, size) {
+    var parts = [];
+    if (Array.isArray(value)) {
+      parts.push('length: ' + value.length);
+    } else if (value !== null && typeof value === 'object') {
+      parts.push('keys: ' + Object.keys(value).length);
+    } else if (typeof value === 'string') {
+      parts.push('chars: ' + value.length);
+    }
+    if (size > 0) {
+      parts.push(GEJQ.formatBytes(size));
+    }
+    return parts.join(' · ');
+  }
+
+  /** Compare mode: the current query applied to baseline vs selected. */
+  function renderDiffView(response, currentValue) {
+    var output = ui.resultOutput;
+    clearChildren(output);
+    var baseline = null;
+    var list = visibleResponses();
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === state.diff.baseId) {
+        baseline = list[i];
+      }
+    }
+    if (!baseline || baseline.id === response.id) {
+      ui.meta.textContent = 'Compare: pick a baseline response below';
+      ui.metaRight.textContent = '';
+      state.diffText = '';
+      output.appendChild(el('div', 'gejq-empty', 'Pick a different response in the "vs" dropdown to compare against.'));
+      return;
+    }
+    var baseValue;
+    try {
+      baseValue = state.query.trim() === '' ? baseline.json : executeQuery(baseline.json, state.query.trim());
+    } catch (e) {
+      output.appendChild(el('div', 'gejq-notice', 'The query fails on the baseline response: ' + (e.message || e)));
+      state.diffText = '';
+      return;
+    }
+    var diffs = GEJQ.diffJson(baseValue, currentValue, 500);
+    ui.meta.textContent = diffs.length + ' difference(s) vs baseline';
+    ui.metaRight.textContent = '';
+    var lines = [];
+    if (diffs.length === 0) {
+      output.appendChild(el('div', 'gejq-empty', 'No differences between the two results.'));
+    }
+    diffs.forEach(function (diff) {
+      var row = el('div', 'gejq-diff-row gejq-diff-' + diff.kind);
+      var marker = diff.kind === 'added' ? '+' : diff.kind === 'removed' ? '−' : '~';
+      row.appendChild(el('span', 'gejq-diff-marker', marker));
+      row.appendChild(el('span', 'gejq-diff-path', diff.path));
+      var beforeText = diff.before === undefined ? '' : JSON.stringify(diff.before);
+      var afterText = diff.after === undefined ? '' : JSON.stringify(diff.after);
+      var detail =
+        diff.kind === 'added' ? afterText : diff.kind === 'removed' ? beforeText : beforeText + ' → ' + afterText;
+      row.appendChild(el('span', 'gejq-diff-detail', detail.length > 160 ? detail.slice(0, 160) + '…' : detail));
+      output.appendChild(row);
+      lines.push(marker + ' ' + diff.path + ': ' + detail);
+    });
+    state.diffText = lines.join('\n');
   }
 
   function scheduleRun() {
@@ -406,6 +682,12 @@
 
   /** The current result in the selected export format, or null. */
   function exportPayload() {
+    if (state.diff.active) {
+      if (state.diffText === '') {
+        return null;
+      }
+      return { text: state.diffText, filename: GEJQ.exportFilename('', 'txt'), mime: 'text/plain' };
+    }
     var outcome = currentResult();
     if (outcome.error || outcome.value === undefined) {
       return null;
@@ -413,7 +695,8 @@
     var response = selectedResponse();
     var sourceUrl = response ? response.url : '';
     if (state.format === 'csv') {
-      var csv = GEJQ.toCsv(outcome.value);
+      // Export what the table shows — the applied sorting included.
+      var csv = GEJQ.toCsv(sortedTableRows(outcome.value));
       if (csv === null) {
         return null;
       }
@@ -437,17 +720,23 @@
     }
     var hasResult = !outcome.error && outcome.value !== undefined;
     var csvOk = hasResult && GEJQ.csvEligible(outcome.value);
-    ui.csvToggle.disabled = !csvOk;
+    var diffing = state.diff.active;
+    ui.csvToggle.disabled = diffing || !csvOk;
     ui.csvToggle.title = hasResult && !csvOk
-      ? 'This result cannot be represented as CSV (needs an array of objects or scalar values)'
-      : 'Export as CSV';
-    ui.jsonToggle.classList.toggle('gejq-seg-active', state.format === 'json');
-    ui.csvToggle.classList.toggle('gejq-seg-active', state.format === 'csv');
+      ? 'This result cannot be shown as a table / CSV (needs an array of objects or scalar values)'
+      : 'Table view / export as CSV';
+    ui.jsonToggle.disabled = diffing;
+    ui.treeToggle.disabled = diffing || !hasResult;
+    ui.jsonToggle.classList.toggle('gejq-seg-active', !diffing && state.format === 'json');
+    ui.csvToggle.classList.toggle('gejq-seg-active', !diffing && state.format === 'csv');
+    ui.treeToggle.classList.toggle('gejq-seg-active', !diffing && state.format === 'tree');
     ui.jsonToggle.setAttribute('aria-pressed', state.format === 'json' ? 'true' : 'false');
     ui.csvToggle.setAttribute('aria-pressed', state.format === 'csv' ? 'true' : 'false');
-    var exportable = hasResult && (state.format === 'json' || csvOk);
+    ui.treeToggle.setAttribute('aria-pressed', state.format === 'tree' ? 'true' : 'false');
+    var exportable = diffing ? state.diffText !== '' : hasResult && (state.format !== 'csv' || csvOk);
     ui.copyButton.disabled = !exportable;
     ui.downloadButton.disabled = !exportable;
+    ui.tsvButton.disabled = diffing || !csvOk;
   }
 
   function setFormat(format) {
@@ -495,6 +784,22 @@
     } catch (e) {
       /* ignore */
     }
+  }
+
+  /**
+   * Follow Graph Explorer's own theme switcher (persisted by GE in
+   * localStorage as CURRENT_THEME) instead of only the OS preference,
+   * so the split view never shows mixed light/dark halves.
+   */
+  function syncTheme() {
+    var theme = '';
+    try {
+      theme = (localStorage.getItem('CURRENT_THEME') || '').replace(/"/g, '').toLowerCase();
+    } catch (e) {
+      /* storage blocked — stay on the OS preference */
+    }
+    ui.host.classList.toggle('gejq-theme-dark', theme === 'dark' || theme === 'high-contrast');
+    ui.host.classList.toggle('gejq-theme-light', theme === 'light');
   }
 
   /** Re-apply everything that depends on the selected query language. */
@@ -625,6 +930,43 @@
     );
   }
 
+  /** Baseline options for compare mode: everything except the selection. */
+  function refreshDiffSelect() {
+    var select = ui.diffSelect;
+    var current = selectedResponse();
+    clearChildren(select);
+    var list = visibleResponses().filter(function (entry) {
+      return !current || entry.id !== current.id;
+    });
+    list.forEach(function (entry) {
+      var option = el('option', null, optionLabel(entry));
+      option.value = entry.id;
+      select.appendChild(option);
+    });
+    select.disabled = list.length === 0;
+    if (list.length === 0) {
+      state.diff.baseId = null;
+      return;
+    }
+    // Default baseline: the previous capture of the same URL, if any.
+    var chosen = null;
+    if (state.diff.baseId) {
+      chosen = list.filter(function (entry) {
+        return entry.id === state.diff.baseId;
+      })[0];
+    }
+    if (!chosen && current) {
+      chosen = list.filter(function (entry) {
+        return entry.url === current.url;
+      })[0];
+    }
+    if (!chosen) {
+      chosen = list[0];
+    }
+    state.diff.baseId = chosen.id;
+    select.value = chosen.id;
+  }
+
   function refreshHistorySelect() {
     var select = ui.historySelect;
     var list = visibleResponses();
@@ -644,6 +986,31 @@
       var selected = selectedResponse();
       select.value = selected ? selected.id : list[0].id;
     }
+    if (state.diff.active) {
+      refreshDiffSelect();
+    }
+  }
+
+  /** Feed the current query result back in as a new queryable source. */
+  function pinCurrentResult() {
+    var outcome = currentResult();
+    if (outcome.error || outcome.value === undefined) {
+      return;
+    }
+    manualCounter += 1;
+    var label = state.query.trim() === '' ? '@' : state.query.trim();
+    addResponse({
+      id: 'result-' + Date.now() + '-' + manualCounter,
+      method: 'RESULT',
+      url: 'pinned result #' + manualCounter + ' of ' + (label.length > 50 ? label.slice(0, 50) + '…' : label),
+      status: 0,
+      manual: true,
+      timestamp: Date.now(),
+      json: outcome.value,
+      size: JSON.stringify(outcome.value) ? JSON.stringify(outcome.value).length : 0
+    });
+    state.followLatest = true;
+    setQuery('');
   }
 
   function addResponse(entry) {
@@ -1170,7 +1537,7 @@
    * navigation: a reload would sign the user out. The version dropdown
    * follows the URL automatically (Graph Explorer parses it).
    */
-  function populateGraphExplorer(method, url, headers) {
+  function populateGraphExplorer(method, url, headers, body) {
     method = String(method || 'GET').toUpperCase();
     var input = findEditorInput();
     if (!input) {
@@ -1181,6 +1548,18 @@
     ensureMethodSelected(method);
     if (headers && headers.length > 0) {
       ensureHeaderRows(headers, { force: true });
+    }
+    if (typeof body === 'string' && body !== '') {
+      // GE's request body lives in a Monaco editor, which can't be set
+      // reliably from outside — hand the body over via the clipboard.
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(body).catch(function () {
+          legacyCopy(body);
+        });
+      } else {
+        legacyCopy(body);
+      }
+      setWarning('Request body copied to clipboard — paste it into Graph Explorer’s Request body tab.');
     }
     return true;
   }
@@ -1214,7 +1593,8 @@
             ? {
                 method: response.method,
                 url: response.url,
-                headers: response.requestHeaders || []
+                headers: response.requestHeaders || [],
+                body: response.requestBody || ''
               }
             : null
       },
@@ -1230,6 +1610,64 @@
     renderQueryHistory();
   }
 
+  /** Merge a previously exported query library into the history. */
+  function importQueryLibrary(text) {
+    var parsed = GEJQ.safeJsonParse(text);
+    if (!parsed.ok || !Array.isArray(parsed.value)) {
+      ui.warning.textContent = 'Import failed: the file is not a query-library JSON export.';
+      return;
+    }
+    var imported = 0;
+    parsed.value.forEach(function (item) {
+      if (!item || typeof item.query !== 'string' || typeof item.language !== 'string') {
+        return;
+      }
+      var existing = state.queryHistory.filter(function (candidate) {
+        return candidate.query === item.query && candidate.language === item.language;
+      })[0];
+      var tags = Array.isArray(item.tags)
+        ? item.tags.filter(function (tag) {
+            return typeof tag === 'string';
+          })
+        : [];
+      if (existing) {
+        existing.starred = existing.starred || item.starred === true;
+        existing.label = existing.label || (typeof item.label === 'string' ? item.label : '');
+        tags.forEach(function (tag) {
+          if (existing.tags.indexOf(tag) === -1) {
+            existing.tags.push(tag);
+          }
+        });
+      } else {
+        state.queryHistory.push({
+          query: item.query,
+          language: LANGUAGES[item.language] ? item.language : 'jmespath',
+          lastUsed: typeof item.lastUsed === 'number' ? item.lastUsed : Date.now(),
+          uses: typeof item.uses === 'number' ? item.uses : 1,
+          context:
+            item.context && typeof item.context.url === 'string'
+              ? {
+                  method: typeof item.context.method === 'string' ? item.context.method : 'GET',
+                  url: item.context.url,
+                  headers: Array.isArray(item.context.headers) ? item.context.headers : [],
+                  body: typeof item.context.body === 'string' ? item.context.body : ''
+                }
+              : null,
+          starred: item.starred === true,
+          tags: tags,
+          label: typeof item.label === 'string' ? item.label : ''
+        });
+      }
+      imported++;
+    });
+    state.queryHistory.sort(function (a, b) {
+      return (b.lastUsed || 0) - (a.lastUsed || 0);
+    });
+    state.queryHistory = GEJQ.trimQueryHistoryList(state.queryHistory, state.settings.historyLimit);
+    persistQueryHistory();
+    ui.warning.textContent = 'Imported ' + imported + ' quer' + (imported === 1 ? 'y' : 'ies') + ' into the library.';
+  }
+
   function persistQueryHistory() {
     storageSet(STORAGE_KEY_QUERY_HISTORY, state.queryHistory);
     renderQueryHistory();
@@ -1241,7 +1679,12 @@
     input.type = 'text';
     input.value = (item.tags || []).join(', ');
     input.placeholder = 'tags, comma separated';
+    var done = false; // re-render blurs the input, which must not re-commit
     function commit() {
+      if (done) {
+        return;
+      }
+      done = true;
       var tags = [];
       input.value.split(',').forEach(function (tag) {
         var trimmed = tag.trim();
@@ -1258,12 +1701,50 @@
         commit();
       } else if (event.key === 'Escape') {
         event.stopPropagation();
+        done = true;
         renderQueryHistory(); // cancel
       }
     });
     input.addEventListener('blur', commit);
     row.replaceChild(input, metaLabel);
     input.focus();
+  }
+
+  /** Inline editor for a favorite's display label. */
+  function editLabel(item, row, chip) {
+    var input = el('input', 'gejq-tag-input');
+    input.type = 'text';
+    input.value = item.label || '';
+    input.placeholder = 'name this query…';
+    var done = false; // re-render blurs the input, which must not re-commit
+    function commit() {
+      if (done) {
+        return;
+      }
+      done = true;
+      item.label = input.value.trim();
+      persistQueryHistory();
+    }
+    input.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commit();
+      } else if (event.key === 'Escape') {
+        event.stopPropagation();
+        done = true;
+        renderQueryHistory();
+      }
+    });
+    input.addEventListener('blur', commit);
+    row.replaceChild(input, chip);
+    input.focus();
+  }
+
+  function deleteHistoryEntry(item) {
+    state.queryHistory = state.queryHistory.filter(function (candidate) {
+      return !(candidate.query === item.query && candidate.language === item.language);
+    });
+    persistQueryHistory();
   }
 
   function queryHistoryRow(item) {
@@ -1280,8 +1761,11 @@
     );
     row.appendChild(star);
 
-    row.appendChild(
-      button('gejq-chip', item.query, 'Use this query', function () {
+    var chip = button(
+      'gejq-chip',
+      item.starred && item.label ? item.label : item.query,
+      'Use this query' + (item.starred && item.label ? ': ' + item.query : ''),
+      function () {
         if (LANGUAGES[item.language] && state.settings.queryLanguage !== item.language) {
           // Saved queries are already in their own language — switch
           // without attempting a conversion.
@@ -1291,8 +1775,9 @@
           applyLanguage();
         }
         setQuery(item.query);
-      })
+      }
     );
+    row.appendChild(chip);
 
     var metaText =
       GEJQ.formatTimestamp(item.lastUsed) +
@@ -1308,22 +1793,41 @@
     row.appendChild(metaLabel);
 
     row.appendChild(
-      button('gejq-icon-mini', '🏷', 'Edit tags (comma separated)', function () {
+      button('gejq-icon-mini gejq-hover', '📋', 'Copy this query to the clipboard', function (event) {
+        copyText(item.query, event.currentTarget, '✓');
+      })
+    );
+    if (item.starred) {
+      row.appendChild(
+        button('gejq-icon-mini gejq-hover', '✎', 'Name this favorite', function () {
+          editLabel(item, row, chip);
+        })
+      );
+    }
+    row.appendChild(
+      button('gejq-icon-mini gejq-hover', '🏷', 'Edit tags (comma separated)', function () {
         editTags(item, row, metaLabel);
+      })
+    );
+    row.appendChild(
+      button('gejq-icon-mini gejq-hover', '✕', 'Delete this saved query', function () {
+        deleteHistoryEntry(item);
       })
     );
 
     if (item.context && item.context.url && GEJQ.parseGraphRequest(item.context.url)) {
       var headerCount = Array.isArray(item.context.headers) ? item.context.headers.length : 0;
+      var hasBody = typeof item.context.body === 'string' && item.context.body !== '';
       row.appendChild(
         button(
           'gejq-chip gejq-load',
           'Load ↗',
           'Re-populate Graph Explorer with this request: method, URL with query parameters' +
-            (headerCount > 0 ? ', and ' + headerCount + ' header(s)' : '') +
+            (headerCount > 0 ? ', ' + headerCount + ' header(s)' : '') +
+            (hasBody ? ', body → clipboard' : '') +
             ' — all in place, no reload',
           function () {
-            populateGraphExplorer(item.context.method, item.context.url, item.context.headers);
+            populateGraphExplorer(item.context.method, item.context.url, item.context.headers, item.context.body);
           }
         )
       );
@@ -1646,6 +2150,9 @@
     header.appendChild(title);
     var headerButtons = el('div', 'gejq-header-buttons');
     headerButtons.appendChild(
+      button('gejq-icon-button', 'Pin result', 'Use the current query result as a new queryable source', pinCurrentResult)
+    );
+    headerButtons.appendChild(
       button('gejq-icon-button', 'Paste JSON', 'Query JSON you paste in manually', showPasteDialog)
     );
     headerButtons.appendChild(
@@ -1708,7 +2215,31 @@
       runQuery();
     });
     historyRow.appendChild(historySelect);
+    var diffToggle = button('gejq-icon-mini gejq-diff-toggle', '⇄', 'Compare this result against another captured response', function () {
+      state.diff.active = !state.diff.active;
+      if (state.diff.active) {
+        refreshDiffSelect();
+      }
+      ui.diffRow.style.display = state.diff.active ? '' : 'none';
+      diffToggle.classList.toggle('gejq-tag-active', state.diff.active);
+      diffToggle.setAttribute('aria-pressed', state.diff.active ? 'true' : 'false');
+      runQuery();
+    });
+    historyRow.appendChild(diffToggle);
     panel.appendChild(historyRow);
+
+    // Compare mode: baseline picker (hidden until ⇄ is toggled on).
+    var diffRow = el('div', 'gejq-diff-row');
+    diffRow.style.display = 'none';
+    diffRow.appendChild(el('span', 'gejq-diff-label', 'vs'));
+    var diffSelect = el('select', 'gejq-history-select gejq-diff-select');
+    diffSelect.title = 'Baseline response to compare against';
+    diffSelect.addEventListener('change', function () {
+      state.diff.baseId = diffSelect.value;
+      runQuery();
+    });
+    diffRow.appendChild(diffSelect);
+    panel.appendChild(diffRow);
 
     // Top half of the split: the query input with the language selector.
     var queryRow = el('div', 'gejq-query-row');
@@ -1780,8 +2311,12 @@
     var warning = el('div', 'gejq-warning');
     panel.appendChild(warning);
 
+    var metaRow = el('div', 'gejq-meta-row');
     var meta = el('div', 'gejq-meta');
-    panel.appendChild(meta);
+    var metaRight = el('div', 'gejq-meta gejq-meta-right');
+    metaRow.appendChild(meta);
+    metaRow.appendChild(metaRight);
+    panel.appendChild(metaRow);
 
     // Bottom half of the split: the query result.
     var resultOutput = el('div', 'gejq-result');
@@ -1835,9 +2370,55 @@
 
     var queryHistoryList = el('div', 'gejq-query-history');
     queryHistoryBody.appendChild(queryHistoryList);
-    queryHistoryBody.appendChild(
-      button('gejq-icon-button', 'Clear history', 'Delete all saved queries', clearQueryHistory)
+
+    var historyActions = el('div', 'gejq-history-actions');
+    var clearArmed = null;
+    var clearButton = button('gejq-icon-button', 'Clear history', 'Delete all saved queries (asks to confirm)', function () {
+      if (clearArmed === null) {
+        clearButton.textContent = 'Really clear? Click again';
+        clearButton.classList.add('gejq-danger');
+        clearArmed = setTimeout(function () {
+          clearArmed = null;
+          clearButton.textContent = 'Clear history';
+          clearButton.classList.remove('gejq-danger');
+        }, 3000);
+        return;
+      }
+      clearTimeout(clearArmed);
+      clearArmed = null;
+      clearButton.textContent = 'Clear history';
+      clearButton.classList.remove('gejq-danger');
+      clearQueryHistory();
+    });
+    historyActions.appendChild(clearButton);
+    historyActions.appendChild(
+      button('gejq-icon-button', 'Export', 'Download the query library as JSON (queries, favorites, tags)', function () {
+        downloadText(JSON.stringify(state.queryHistory, null, 2), GEJQ.exportFilename('', 'json').replace('graph-query', 'query-library'), 'application/json');
+      })
     );
+    var importInput = el('input');
+    importInput.type = 'file';
+    importInput.accept = '.json,application/json';
+    importInput.style.display = 'none';
+    importInput.addEventListener('change', function () {
+      var file = importInput.files && importInput.files[0];
+      importInput.value = '';
+      if (!file) {
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function () {
+        importQueryLibrary(String(reader.result || ''));
+      };
+      reader.readAsText(file);
+    });
+    historyActions.appendChild(importInput);
+    historyActions.appendChild(
+      button('gejq-icon-button', 'Import', 'Merge a previously exported query library', function () {
+        importInput.click();
+      })
+    );
+    queryHistoryBody.appendChild(historyActions);
     queryHistoryDetails.appendChild(queryHistoryBody);
     panel.appendChild(queryHistoryDetails);
 
@@ -1854,21 +2435,34 @@
     // Format switch: Copy and Download follow the selected format.
     var formatSwitch = el('div', 'gejq-seg');
     formatSwitch.setAttribute('role', 'group');
-    formatSwitch.setAttribute('aria-label', 'Export format');
-    var jsonToggle = button('gejq-seg-btn', 'JSON', 'Export as JSON', function () {
+    formatSwitch.setAttribute('aria-label', 'Result view and export format');
+    var jsonToggle = button('gejq-seg-btn', 'JSON', 'JSON view / export as JSON', function () {
       setFormat('json');
     });
-    var csvToggle = button('gejq-seg-btn', 'CSV', 'Export as CSV', function () {
+    var csvToggle = button('gejq-seg-btn', 'CSV', 'Table view / export as CSV', function () {
       setFormat('csv');
+    });
+    var treeToggle = button('gejq-seg-btn', 'Tree', 'Interactive tree — click a property to use its path as the query', function () {
+      setFormat('tree');
     });
     formatSwitch.appendChild(jsonToggle);
     formatSwitch.appendChild(csvToggle);
+    formatSwitch.appendChild(treeToggle);
     footer.appendChild(formatSwitch);
 
     var copyButton = button('gejq-action', 'Copy', 'Copy the query result in the selected format', function () {
       var payload = exportPayload();
       if (payload !== null) {
         copyText(payload.text, copyButton, 'Copied ✓');
+      }
+    });
+    var tsvButton = button('gejq-action gejq-action-small', 'TSV', 'Copy as tab-separated values — pastes into Excel as a grid (sorted like the table)', function () {
+      var outcome = currentResult();
+      if (!outcome.error && outcome.value !== undefined) {
+        var tsv = GEJQ.toTsv(sortedTableRows(outcome.value));
+        if (tsv !== null) {
+          copyText(tsv, tsvButton, '✓');
+        }
       }
     });
     var downloadButton = button('gejq-action', 'Download', 'Download the query result in the selected format', function () {
@@ -1880,6 +2474,7 @@
       }
     });
     footer.appendChild(copyButton);
+    footer.appendChild(tsvButton);
     footer.appendChild(downloadButton);
     panel.appendChild(footer);
 
@@ -1935,6 +2530,9 @@
       error: error,
       warning: warning,
       meta: meta,
+      metaRight: metaRight,
+      diffRow: diffRow,
+      diffSelect: diffSelect,
       resultOutput: resultOutput,
       suggestions: suggestions,
       suggestionsDetails: suggestionsDetails,
@@ -1946,9 +2544,11 @@
       historyFilterRow: historyFilterRow,
       historyTagChips: historyTagChips,
       copyButton: copyButton,
+      tsvButton: tsvButton,
       downloadButton: downloadButton,
       jsonToggle: jsonToggle,
       csvToggle: csvToggle,
+      treeToggle: treeToggle,
       pasteOverlay: pasteOverlay,
       pasteInput: pasteInput,
       pasteError: pasteError
@@ -1980,7 +2580,14 @@
       return;
     }
     var data = event.data;
-    if (!data || data.source !== MESSAGE_SOURCE || data.type !== 'graph-response') {
+    if (!data || data.source !== MESSAGE_SOURCE) {
+      return;
+    }
+    if (data.type === 'graph-fetch-progress') {
+      handleFetchProgress(data.payload);
+      return;
+    }
+    if (data.type !== 'graph-response') {
       return;
     }
     var payload = data.payload;
@@ -2031,9 +2638,44 @@
       truncated: payload.truncated === true,
       background: background,
       requestHeaders: requestHeaders,
+      requestBody: typeof payload.requestBody === 'string' ? payload.requestBody : '',
       tooLarge: payload.tooLarge === true
     });
   });
+
+  /** Live line while auto-fetch walks @odata.nextLink pages. */
+  function handleFetchProgress(payload) {
+    if (!ui || !payload) {
+      return;
+    }
+    if (payload.done === true) {
+      // The aggregated entry (posted right before) re-runs the query and
+      // overwrites the warning row; just drop the progress text.
+      if (ui.warning.getAttribute('data-progress') === '1') {
+        clearChildren(ui.warning);
+        ui.warning.removeAttribute('data-progress');
+      }
+      return;
+    }
+    clearChildren(ui.warning);
+    ui.warning.setAttribute('data-progress', '1');
+    ui.warning.appendChild(
+      el(
+        'span',
+        null,
+        'Auto-fetching pages: ' + payload.pages + ' fetched, ' + payload.items + ' items (' + GEJQ.formatBytes(payload.size) + ')… '
+      )
+    );
+    ui.warning.appendChild(
+      button('gejq-link-button', 'Cancel', 'Stop after the current page and keep what was fetched', function () {
+        try {
+          window.postMessage({ source: 'gejq-cancel-autofetch' }, window.location.origin);
+        } catch (e) {
+          /* ignore */
+        }
+      })
+    );
+  }
 
   function init() {
     fetch(chrome.runtime.getURL('src/content.css'))
@@ -2048,7 +2690,7 @@
           [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FORMAT, STORAGE_KEY_SPLIT, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
           function (items) {
             state.collapsedPref = items[STORAGE_KEY_COLLAPSED] === true;
-            state.format = items[STORAGE_KEY_FORMAT] === 'csv' ? 'csv' : 'json';
+            state.format = ['csv', 'tree'].indexOf(items[STORAGE_KEY_FORMAT]) !== -1 ? items[STORAGE_KEY_FORMAT] : 'json';
             state.splitPct = GEJQ.clampInt(items[STORAGE_KEY_SPLIT], 15, 85, 50);
             state.settings = normalizeSettings(items[STORAGE_KEY_SETTINGS]);
             state.queryHistory = Array.isArray(items[STORAGE_KEY_QUERY_HISTORY])
@@ -2067,6 +2709,17 @@
           }
         );
       });
+
+    // Alt+Q (the "focus-query-input" command) routed via the service worker.
+    try {
+      chrome.runtime.onMessage.addListener(function (message) {
+        if (message && message.type === 'gejq-focus-query' && ui) {
+          openPanel();
+        }
+      });
+    } catch (e) {
+      /* runtime messaging unavailable */
+    }
 
     try {
       chrome.storage.onChanged.addListener(function (changes, areaName) {

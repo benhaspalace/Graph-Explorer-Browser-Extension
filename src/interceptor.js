@@ -23,7 +23,9 @@
 
   var MESSAGE_SOURCE = 'gejq-interceptor';
   var SETTINGS_SOURCE = 'gejq-settings';
+  var CANCEL_SOURCE = 'gejq-cancel-autofetch';
   var MAX_BODY_CHARS = 10 * 1024 * 1024; // 10 MB of JSON text is plenty
+  var MAX_REQUEST_BODY_CHARS = 100 * 1024; // captured request bodies
   var GRAPH_HOSTS = [
     'graph.microsoft.com',
     'graph.microsoft.us',
@@ -42,6 +44,8 @@
     autoFetchMaxChars: 10 * 1024 * 1024
   };
 
+  var autoFetchCancelled = false;
+
   window.addEventListener('message', function (event) {
     if (event.source !== window || event.origin !== window.location.origin) {
       return;
@@ -51,6 +55,9 @@
       settings.autoFetchNextLink = data.settings.autoFetchNextLink === true;
       settings.autoFetchMaxPages = GEJQ.clampInt(data.settings.autoFetchMaxPages, 1, 1000, 50);
       settings.autoFetchMaxChars = GEJQ.clampInt(data.settings.autoFetchMaxChars, 1, 50 * 1024 * 1024, 10 * 1024 * 1024);
+    }
+    if (data && data.source === CANCEL_SOURCE) {
+      autoFetchCancelled = true;
     }
   });
 
@@ -88,8 +95,12 @@
   }
 
   function post(payload) {
+    postTyped('graph-response', payload);
+  }
+
+  function postTyped(type, payload) {
     try {
-      window.postMessage({ source: MESSAGE_SOURCE, type: 'graph-response', payload: payload }, window.location.origin);
+      window.postMessage({ source: MESSAGE_SOURCE, type: type, payload: payload }, window.location.origin);
     } catch (e) {
       /* payload not cloneable — ignore */
     }
@@ -106,13 +117,16 @@
     };
   }
 
-  function handleBodyText(text, method, url, status, requestHeaders) {
+  function handleBodyText(text, method, url, status, requestHeaders, requestBody) {
     if (typeof text !== 'string' || text.length === 0) {
       return null;
     }
     var entry = makeEntry(method, url, status);
     if (requestHeaders && requestHeaders.length > 0) {
       entry.requestHeaders = requestHeaders;
+    }
+    if (typeof requestBody === 'string' && requestBody.length > 0) {
+      entry.requestBody = requestBody.slice(0, MAX_REQUEST_BODY_CHARS);
     }
     if (text.length > MAX_BODY_CHARS) {
       entry.tooLarge = true;
@@ -163,6 +177,17 @@
     var combinedValue = firstJson.value.slice();
     var pages = 1;
     var totalSize = firstEntry.size || 0;
+    autoFetchCancelled = false;
+
+    function progress(done) {
+      postTyped('graph-fetch-progress', {
+        url: firstEntry.url,
+        pages: pages,
+        items: combinedValue.length,
+        size: totalSize,
+        done: done === true
+      });
+    }
 
     /** remainingNextLink is set when limits (or a fetch error) stopped
      *  the chain while more data was still available. */
@@ -197,16 +222,20 @@
         parsed = new URL(nextUrl);
       } catch (e) {
         finish();
+        progress(true);
         return;
       }
       if (!isGraphHost(parsed.hostname)) {
         finish();
+        progress(true);
         return;
       }
-      if (pages >= settings.autoFetchMaxPages || totalSize > settings.autoFetchMaxChars) {
+      if (autoFetchCancelled || pages >= settings.autoFetchMaxPages || totalSize > settings.autoFetchMaxChars) {
         finish(nextUrl);
+        progress(true);
         return;
       }
+      progress(false);
       originalFetch(nextUrl, { headers: headers })
         .then(function (response) {
           if (!response.ok) {
@@ -233,20 +262,24 @@
               var next = pageJson['@odata.nextLink'];
               if (typeof next !== 'string') {
                 finish();
+                progress(true);
               } else if (totalSize > settings.autoFetchMaxChars) {
                 // Checked after accumulating too, so the size limit is a
                 // hard ceiling rather than "limit plus one page".
                 finish(next);
+                progress(true);
               } else {
                 step(next);
               }
             })
             .catch(function () {
               finish(nextUrl);
+              progress(true);
             });
         })
         .catch(function () {
           finish(nextUrl);
+          progress(true);
         });
     }
 
@@ -262,6 +295,35 @@
       return input.headers;
     }
     return undefined;
+  }
+
+  /**
+   * Best-effort capture of a body-carrying request's body as a string
+   * (resolves null for streams/forms or when there is no body).
+   */
+  function capturedRequestBody(input, init, method) {
+    try {
+      if (!/^(POST|PUT|PATCH)$/i.test(String(method || ''))) {
+        return Promise.resolve(null);
+      }
+      if (init && typeof init.body === 'string') {
+        return Promise.resolve(init.body);
+      }
+      if (input instanceof Request && !input.bodyUsed) {
+        return input
+          .clone()
+          .text()
+          .then(function (text) {
+            return text || null;
+          })
+          .catch(function () {
+            return null;
+          });
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    return Promise.resolve(null);
   }
 
   /**
@@ -292,6 +354,7 @@
       var graphUrl = null;
       var graphInfo = null;
       var method = 'GET';
+      var requestBodyPromise = null;
       try {
         var rawUrl =
           typeof input === 'string'
@@ -306,6 +369,10 @@
             (init && init.method) ||
             (input && typeof input === 'object' && input.method) ||
             'GET';
+          if (graphInfo.direct) {
+            // Must clone before originalFetch consumes the body stream.
+            requestBodyPromise = capturedRequestBody(input, init, method);
+          }
         }
       } catch (e) {
         /* never break the page's fetch */
@@ -320,15 +387,19 @@
                 if (contentType && !/json|text/i.test(contentType)) {
                   return; // images, binary streams, …
                 }
+                var direct = graphInfo && graphInfo.direct;
+                var bodyPromise = requestBodyPromise || Promise.resolve(null);
                 response
                   .clone()
                   .text()
                   .then(function (text) {
-                    var sanitized = graphInfo && graphInfo.direct ? capturedRequestHeaders(input, init) : [];
-                    var entry = handleBodyText(text, method, graphUrl, response.status, sanitized);
-                    if (entry && entry.json && graphInfo && graphInfo.direct) {
-                      maybeAutoFetchAllPages(entry, requestHeaders(input, init), method);
-                    }
+                    bodyPromise.then(function (requestBody) {
+                      var sanitized = direct ? capturedRequestHeaders(input, init) : [];
+                      var entry = handleBodyText(text, method, graphUrl, response.status, sanitized, requestBody);
+                      if (entry && entry.json && direct) {
+                        maybeAutoFetchAllPages(entry, requestHeaders(input, init), method);
+                      }
+                    });
                   })
                   .catch(function () {});
               } catch (e) {

@@ -54,7 +54,9 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   may ask you to allow the sign-in popup).
 - **Auto-fetch all pages** *(opt-in)* — follow the `@odata.nextLink` chain and
   add the combined dataset to the response list, so you can query the entire
-  result set at once. The page-count and data-size limits are configurable
+  result set at once. While pages stream in, the panel shows a live progress
+  line (pages · items · size) with a **Cancel** link that keeps what was
+  fetched so far. The page-count and data-size limits are configurable
   (defaults: 50 pages / 10 MB); if a query exceeds them the combined entry is
   marked *incomplete* and the panel shows a warning. The extension replays the
   original request's own headers for the follow-up pages; nothing is stored.
@@ -66,25 +68,49 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   saved query restores it — including its query language — and the **Load ↗**
   button re-populates Graph Explorer's request editor with the saved request:
   URL (query parameters included), method (selected through GE's own
-  dropdown), and the request's sanitized headers (re-added through the
-  Request-headers view). Everything happens in place — no page reload, so
-  your sign-in session is untouched.
+  dropdown), the request's sanitized headers (re-added through the
+  Request-headers view), and — for requests that had one — the body, copied
+  to your clipboard to paste into the Request-body tab. Everything happens in
+  place — no page reload, so your sign-in session is untouched.
 - **Favorites, tags, and filtering** — star ★ a saved query to pin it
-  (favorites sit on top and are never trimmed by the history limit), tag 🏷
-  queries with your own labels, and filter the expanded history by free
-  text, time window (last hour → last 30 days), and tag chips (multiple
-  tags combine as AND).
+  (favorites sit on top and are never trimmed by the history limit), give a
+  favorite its own display name with ✎, tag 🏷 queries with your own labels,
+  and filter the expanded history by free text, time window (last hour →
+  last 30 days), and tag chips (multiple tags combine as AND). Hovering a
+  row reveals 📋 copy-to-clipboard and ✕ delete; **Clear** asks for a
+  confirming second click, and **Export**/**Import** move the whole query
+  library between browsers as a JSON file (imports merge, keeping stars,
+  names, and tags).
 - **Smart suggestions** — one-click query chips generated from the shape of
   the current response in the selected language, plus a built-in cheat sheet.
-- **Export as JSON or CSV** — a format switch in the footer controls the
-  output view as well as **Copy** and **Download** (CSV is available for
-  arrays of objects or scalars — great for Excel; downloads include a UTF-8
-  BOM so Excel reads accents correctly).
+- **JSON, table, or tree view** — a three-way switch in the footer changes
+  how the result renders, and the top-right of the result always shows its
+  length and size. **CSV** renders the result as a real table: click a
+  column header to sort (numbers sort numerically, missing values last),
+  and **Copy**/**Download** export the CSV *with the applied sorting*; a
+  **TSV** button copies a tab-separated grid that pastes straight into
+  Excel. CSV downloads include a UTF-8 BOM so Excel reads accents
+  correctly. **Tree** shows a collapsible tree of the current result —
+  click any property to use its path as the query (with a query already in
+  the box, the click composes: `.value` + a click on `displayName` →
+  `.value | .[].displayName`).
+- **Compare responses (⇄)** — toggle diff mode to see what changed between
+  the current response and any earlier captured one (added / removed /
+  changed, with paths). Your query is applied to both sides first, so you
+  can diff exactly the slice you care about; the baseline defaults to the
+  previous run of the same URL.
+- **Pin a result (📌)** — turn the current query result into a new queryable
+  source in the response list, so you can refine it further or diff
+  against it later.
 - **Paste JSON** — paste any JSON document to query it, even without running a
   Graph request.
 - **Quick access** — double-click the toolbar icon to jump straight to Graph
   Explorer (single click opens the settings popup, where Enter also opens
-  Graph Explorer), or press <kbd>Alt</kbd>+<kbd>G</kbd> from anywhere.
+  Graph Explorer), press <kbd>Alt</kbd>+<kbd>G</kbd> from anywhere to open
+  it, or <kbd>Alt</kbd>+<kbd>Q</kbd> on a Graph Explorer tab to open the
+  panel and focus the query box.
+- **Follows Graph Explorer's theme** — the panel switches light/dark with
+  Graph Explorer's own theme setting, falling back to the OS preference.
 - **All Graph clouds** — captures responses from `graph.microsoft.com`,
   US Government and China endpoints, and Graph Explorer's sample-tenant proxy
   used when you're not signed in.
@@ -116,10 +142,13 @@ and run any query. Requires Chrome/Edge 111 or newer.
 1. Run a query in Graph Explorer, e.g. `GET /v1.0/users`.
 2. The response area splits and the **JSON Query** panel appears on the right
    (if you hid it, click the **{;} JSON Query** button in the bottom-right corner).
-3. Pick a language (JMESPath or JSONPath) and type a query in the top box —
-   the result renders below as you type. An empty query shows the whole
-   response. Press Enter to save the query into the history.
-4. Pick **JSON** or **CSV** in the footer, then **Copy** or **Download**.
+3. Pick a language (JMESPath, JSONPath, or jq) and type a query in the top
+   box — the result renders below as you type. An empty query shows the
+   whole response. Press Enter to save the query into the history.
+4. Pick **JSON**, **CSV** (sortable table), or **Tree** in the footer, then
+   **Copy** or **Download** — or explore: click tree properties to build the
+   query, ⇄ to diff against an earlier response, 📌 to pin the result as a
+   new source.
 
 ### Settings
 
@@ -204,8 +233,8 @@ to `main` and uploads a ready-to-load extension artifact.
 **Note on non-English locales:** in-place editor population and auto
 sign-in locate Graph Explorer controls primarily by their English
 aria-labels (with a structural fallback for the request input). On other
-locales the Load button falls back to the deep link — which still works —
-and auto sign-in may not trigger.
+locales the Load ↗ button may only restore the URL, and auto sign-in may
+not trigger.
 
 ### Repository layout
 
@@ -215,9 +244,10 @@ src/interceptor.js     MAIN-world fetch/XHR interceptor + request upgrades
 src/content.js         Panel UI (isolated world, ShadowRoot)
 src/content.css        Panel styles (light + dark theme)
 src/query-utils.js     Pure helpers, shared with unit tests
-src/background.js      Service worker (Alt+G command)
+src/background.js      Service worker (Alt+G / Alt+Q commands)
 vendor/jmespath.js     Vendored JMESPath engine (MIT)
 vendor/jsonpath-plus.js Vendored JSONPath engine (MIT)
+vendor/jqts.js         Vendored jq engine (jqts, MIT)
 popup/                 Toolbar popup: instructions + settings
 scripts/make-icons.js  Icon generator (no dependencies)
 test/                  Unit tests (`node --test`)
