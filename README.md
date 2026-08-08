@@ -243,13 +243,35 @@ never response data). Header sanitization always drops `Authorization`,
 cookies, and Graph Explorer's telemetry headers before anything is kept, so
 access tokens are never read or stored.
 
+### Security & supply chain
+
+The extension is built to be safe in security-conscious environments — see
+[SECURITY.md](SECURITY.md) for the full security model, supply-chain
+controls, and how to report a vulnerability, and [SBOM.md](SBOM.md) for the
+component inventory. Highlights:
+
+- **No runtime npm dependencies.** Every third-party library is a
+  version-pinned, pre-built bundle in `vendor/`, and its SHA-256 is pinned
+  in `vendor/CHECKSUMS.txt` and verified on every build
+  (`npm run verify:vendor` — also a CI gate every other job depends on).
+- **No dynamic code, no remote code, no telemetry.** No `eval`/`innerHTML`;
+  a strict extension-pages CSP; the only permission is `storage`; host scope
+  is limited to `developer.microsoft.com`.
+- **Hardened CI/CD.** Actions pinned to commit SHAs (kept current by
+  Dependabot), read-only default token, `--ignore-scripts` installs.
+- **Verifiable releases.** Each release ships a `.sha256` checksum and a
+  SLSA build-provenance attestation. Verify with `sha256sum -c …` and
+  `gh attestation verify …` (commands in [SECURITY.md](SECURITY.md)).
+
 ## Development
 
 ```bash
-npm test        # unit tests (node:test, no dependencies)
-npm run e2e     # offline end-to-end smoke test (needs Playwright + Chromium)
-npm run icons   # regenerate icons/ from scripts/make-icons.js
-npm run package # zip the extension into dist/ for store submission
+npm test           # verify vendored checksums, then run unit tests (node:test)
+npm run verify:vendor  # check vendor/*.js against vendor/CHECKSUMS.txt
+npm run e2e        # offline end-to-end smoke test (needs Playwright + Chromium)
+npm run icons      # regenerate icons/ from scripts/make-icons.js
+npm run package    # zip the extension into dist/ for store submission
+npm run vendor:hash    # regenerate vendor/CHECKSUMS.txt after a bundle update
 ```
 
 The repository root is the extension — edit, then hit **Reload** on the
@@ -285,9 +307,13 @@ vendor/jmespath.js     Vendored JMESPath engine (MIT)
 vendor/jsonpath-plus.js Vendored JSONPath engine (MIT)
 vendor/jqts.js         Vendored jq engine (jqts, MIT)
 vendor/codemirror.js   Vendored CodeMirror 6 bundle (MIT)
+vendor/CHECKSUMS.txt   Pinned SHA-256 of each vendored bundle
 popup/                 Toolbar popup: instructions + settings
 scripts/make-icons.js  Icon generator (no dependencies)
+scripts/verify-vendor.js  Vendored-dependency integrity check (no deps)
 test/                  Unit tests (`node --test`)
+SECURITY.md            Security model, supply-chain controls, reporting
+SBOM.md                Software bill of materials
 ```
 
 ## Future ideas

@@ -7,18 +7,42 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege by default: read-only token for every job. The release
+# job below re-declares the extra scopes it actually needs.
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: Unit tests
+  # Supply-chain gate: fail fast if any vendored third-party bundle has been
+  # altered (see scripts/verify-vendor.js + vendor/CHECKSUMS.txt). Every
+  # other job depends on this, so nothing builds or ships from tampered deps.
+  integrity:
+    name: Verify vendored dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+      - name: Verify vendored bundle checksums
+        run: npm run verify:vendor
+
+  test:
+    name: Unit tests
+    needs: integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      # No install step: the extension and its unit tests have zero runtime
+      # or test npm dependencies (node:test only). `pretest` re-verifies the
+      # vendored checksums.
       - name: Run unit tests
         run: npm test
 
@@ -27,19 +51,24 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - name: Install Playwright
+        # --ignore-scripts blocks lifecycle scripts (a common supply-chain
+        # vector); the browser is then fetched explicitly below. Pinned to an
+        # exact version so the toolchain is reproducible.
         run: |
-          npm install --no-save playwright@1.56.1
+          npm install --no-save --ignore-scripts --no-audit --no-fund playwright@1.56.1
           npx playwright install --with-deps chromium
       - name: Run smoke test (offline, route-intercepted)
         run: npm run e2e
       - name: Upload screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-screenshots
           path: test/e2e/artifacts
@@ -47,10 +76,12 @@ jobs:
 
   package:
     name: Package extension
-    needs: test
+    needs: [integrity, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Verify manifest and version
         id: meta
         run: |
@@ -63,7 +94,7 @@ jobs:
       # upload-artifact zips the staged folder itself, so the download is a
       # single zip: unzip it and "Load unpacked" the inner folder.
       - name: Upload extension artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: graph-explorer-json-query-v${{ steps.meta.outputs.version }}
           path: dist/graph-explorer-json-query
@@ -78,9 +109,15 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # create the release + upload assets
+      id-token: write # keyless signing for build provenance
+      attestations: write # record the provenance attestation
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Re-verify vendored dependencies
+        run: npm run verify:vendor
       - name: Read version
         id: meta
         run: echo "version=$(node -p "require('./manifest.json').version")" >> "$GITHUB_OUTPUT"
@@ -94,20 +131,34 @@ jobs:
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Package extension zip
+      - name: Package extension zip + checksum
         if: steps.released.outputs.exists == 'false'
         run: |
           mkdir -p dist/graph-explorer-json-query
           cp -r manifest.json icons popup src vendor LICENSE dist/graph-explorer-json-query/
-          (cd dist && zip -qr "graph-explorer-json-query-v${{ steps.meta.outputs.version }}.zip" graph-explorer-json-query)
+          zip_name="graph-explorer-json-query-v${{ steps.meta.outputs.version }}.zip"
+          (cd dist && zip -qr "$zip_name" graph-explorer-json-query)
+          (cd dist && sha256sum "$zip_name" > "$zip_name.sha256")
+      - name: Attest build provenance (SLSA)
+        if: steps.released.outputs.exists == 'false'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/graph-explorer-json-query-v${{ steps.meta.outputs.version }}.zip
       - name: Create release
         if: steps.released.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${{ steps.meta.outputs.version }}" \
-            "dist/graph-explorer-json-query-v${{ steps.meta.outputs.version }}.zip" \
+          version="${{ steps.meta.outputs.version }}"
+          gh release create "v$version" \
+            "dist/graph-explorer-json-query-v$version.zip" \
+            "dist/graph-explorer-json-query-v$version.zip.sha256" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "v${{ steps.meta.outputs.version }}" \
+            --title "v$version" \
             --generate-notes \
-            --notes "Unzip the attached file and use **Load unpacked** on the inner folder — see the [README](https://github.com/$GITHUB_REPOSITORY#installation-load-unpacked) for step-by-step instructions."
+            --notes "Unzip the attached \`.zip\` and use **Load unpacked** on the inner folder — see the [README](https://github.com/$GITHUB_REPOSITORY#installation-load-unpacked).
+
+          **Verify before installing:**
+          - Checksum: \`sha256sum -c graph-explorer-json-query-v$version.zip.sha256\`
+          - Build provenance: \`gh attestation verify graph-explorer-json-query-v$version.zip --repo $GITHUB_REPOSITORY\`
+          - Vendored dependencies: after unzipping, \`npm run verify:vendor\` (or check \`vendor/CHECKSUMS.txt\`)."
