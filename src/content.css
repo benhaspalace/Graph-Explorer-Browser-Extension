@@ -317,6 +317,59 @@
   margin-bottom: 6px;
 }
 
+.gejq-query-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.gejq-autocomplete {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  box-shadow: var(--gejq-shadow);
+}
+
+.gejq-ac-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.gejq-ac-label {
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 12px;
+  color: var(--gejq-text);
+}
+
+.gejq-ac-detail {
+  font-size: 11px;
+  color: var(--gejq-text-subtle);
+  white-space: nowrap;
+}
+
+.gejq-ac-item.gejq-ac-active,
+.gejq-ac-item:hover {
+  background: var(--gejq-accent);
+}
+
+.gejq-ac-item.gejq-ac-active .gejq-ac-label,
+.gejq-ac-item.gejq-ac-active .gejq-ac-detail,
+.gejq-ac-item:hover .gejq-ac-label,
+.gejq-ac-item:hover .gejq-ac-detail {
+  color: #ffffff;
+}
+
 .gejq-query-input {
   width: 100%;
   padding: 6px 8px;

@@ -391,6 +391,59 @@ test('groupQueryHistory orders favorites, tag groups, then recent', () => {
   assert.deepEqual(GEJQ.groupQueryHistory([]), []);
 });
 
+test('queryCompletions matches identifier fragments per language', () => {
+  const jmes = GEJQ.queryCompletions('jmespath', 'sort_by(value, &displayName) | so');
+  assert.ok(jmes.items.map((i) => i.label).includes('sort('));
+  assert.ok(jmes.items.map((i) => i.label).includes('sort_by('));
+  assert.equal(jmes.fragment, 'so');
+  assert.equal(jmes.replaceFrom, 'sort_by(value, &displayName) | '.length);
+
+  const jq = GEJQ.queryCompletions('jq', '.value | uniq');
+  assert.deepEqual(jq.items.map((i) => i.label), ['unique_by(', 'unique']);
+
+  const jsonpath = GEJQ.queryCompletions('jsonpath', '$.value fil');
+  assert.ok(jsonpath.items.some((i) => i.insert.startsWith('[?(')));
+
+  assert.equal(GEJQ.queryCompletions('jmespath', 'value['), null); // no fragment
+  assert.equal(GEJQ.queryCompletions('jmespath', ''), null);
+  assert.equal(GEJQ.queryCompletions('jmespath', "value[?contains(displayName, 'so"), null); // inside string
+  // Typed-out JMESPath 'length' still completes to 'length(' (adds the paren)…
+  assert.ok(GEJQ.queryCompletions('jmespath', 'length').items.some((i) => i.label === 'length('));
+  // …while an exact bare-word match (jq 'length') has nothing left to add.
+  assert.equal(GEJQ.queryCompletions('jq', '.value | length'), null);
+  assert.equal(GEJQ.queryCompletions('unknown', 'so'), null);
+  const caseInsensitive = GEJQ.queryCompletions('jmespath', 'SORT');
+  assert.ok(caseInsensitive && caseInsensitive.items.length >= 2);
+});
+
+test('every JMESPath completion is a real jmespath.js function', () => {
+  const source = require('node:fs').readFileSync(__dirname + '/../vendor/jmespath.js', 'utf8');
+  let count = 0;
+  for (const letter of 'abcdefghijklmnopqrstuvwxyz') {
+    const result = GEJQ.queryCompletions('jmespath', letter);
+    for (const item of (result && result.items) || []) {
+      const name = item.label.replace(/\($/, '');
+      assert.ok(new RegExp('"?' + name + '"?: \\{').test(source), `${name} must exist in jmespath functionTable`);
+      count++;
+    }
+  }
+  assert.ok(count >= 26, `expected the full function list, saw ${count}`);
+});
+
+test('every jq completion compiles in the bundled jqts engine', () => {
+  const seen = new Set();
+  for (const letter of 'abcdefghijklmnopqrstuvwxyz') {
+    const result = GEJQ.queryCompletions('jq', letter);
+    for (const item of (result && result.items) || []) {
+      if (seen.has(item.label)) continue;
+      seen.add(item.label);
+      const probe = item.insert.endsWith('(') ? item.insert + '.)' : item.insert;
+      assert.doesNotThrow(() => jq.compile(probe), `jq builtin ${item.label} must compile (${probe})`);
+    }
+  }
+  assert.ok(seen.size >= 30, `expected a substantial jq list, got ${seen.size}`);
+});
+
 test('isBackgroundGraphRequest flags Graph Explorer internals only', () => {
   const background = [
     'https://graph.microsoft.com/v1.0/me',

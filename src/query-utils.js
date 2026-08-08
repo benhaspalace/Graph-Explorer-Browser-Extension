@@ -292,6 +292,148 @@
     return '"' + String(key).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
   }
 
+  // --------------------------------------------------- query completions
+
+  function fn(name, detail) {
+    return { label: name + '(', insert: name + '(', detail: detail };
+  }
+
+  function word(name, detail) {
+    return { label: name, insert: name, detail: detail };
+  }
+
+  function snippet(match, insert, detail) {
+    return { label: insert, match: match, insert: insert, detail: detail };
+  }
+
+  // Function lists mirror what the bundled engines actually implement
+  // (jmespath.js functionTable / jqts builtins) — verified by tests.
+  var QUERY_COMPLETIONS = {
+    jmespath: [
+      fn('abs', 'absolute value'),
+      fn('avg', 'average of numbers'),
+      fn('ceil', 'round up'),
+      fn('contains', 'substring / element test'),
+      fn('ends_with', 'string suffix test'),
+      fn('floor', 'round down'),
+      fn('join', 'join strings'),
+      fn('keys', 'object keys'),
+      fn('length', 'count items / chars'),
+      fn('map', 'apply expression to array'),
+      fn('max', 'largest value'),
+      fn('max_by', 'largest by expression'),
+      fn('merge', 'merge objects'),
+      fn('min', 'smallest value'),
+      fn('min_by', 'smallest by expression'),
+      fn('not_null', 'first non-null argument'),
+      fn('reverse', 'reverse array / string'),
+      fn('sort', 'sort array'),
+      fn('sort_by', 'sort by expression'),
+      fn('starts_with', 'string prefix test'),
+      fn('sum', 'sum of numbers'),
+      fn('to_array', 'wrap in array'),
+      fn('to_number', 'convert to number'),
+      fn('to_string', 'convert to string'),
+      fn('type', 'type name'),
+      fn('values', 'object values')
+    ],
+    jq: [
+      word('add', 'sum / concatenate items'),
+      word('all', 'true when all items truthy'),
+      word('any', 'true when any item truthy'),
+      fn('contains', 'containment test'),
+      word('empty', 'no output'),
+      word('first', 'first output'),
+      word('flatten', 'flatten nested arrays'),
+      word('floor', 'round down'),
+      fn('from_entries', 'build object from {key,value} list'),
+      fn('group_by', 'group items by expression'),
+      fn('has', 'key / index presence'),
+      fn('endswith', 'string suffix test'),
+      word('keys', 'object keys / array indexes'),
+      word('last', 'last output'),
+      word('length', 'count items / chars'),
+      fn('map', 'apply filter to each item'),
+      word('max', 'largest value'),
+      fn('max_by', 'largest by expression'),
+      word('min', 'smallest value'),
+      fn('min_by', 'smallest by expression'),
+      fn('range', 'number sequence'),
+      word('reverse', 'reverse array'),
+      fn('select', 'keep items matching condition'),
+      word('sort', 'sort array'),
+      fn('sort_by', 'sort by expression'),
+      word('sqrt', 'square root'),
+      fn('startswith', 'string prefix test'),
+      fn('to_entries', 'object → {key,value} list'),
+      word('tonumber', 'convert to number'),
+      word('tostring', 'convert to string'),
+      word('type', 'type name'),
+      fn('unique_by', 'dedupe by expression'),
+      word('unique', 'dedupe array'),
+      word('values', 'object / array values'),
+      fn('with_entries', 'transform object entries')
+    ],
+    jsonpath: [
+      snippet('wildcard', '[*]', 'every item'),
+      snippet('all', '[*]', 'every item'),
+      snippet('recursive', '..', 'recursive descent'),
+      snippet('filter', "[?(@.prop == 'value')]", 'filter items'),
+      snippet('exists', '[?(@.prop)]', 'items where a field exists'),
+      snippet('slice', '[0:5]', 'array slice'),
+      snippet('length', '.length', 'count items'),
+      snippet('property', "[?(@property === 'name')]", 'match by property name'),
+      snippet('root', '$', 'document root')
+    ]
+  };
+
+  /**
+   * Tier-1 completion: match the identifier fragment before the cursor
+   * against the language's function/keyword list. Returns
+   * { replaceFrom, fragment, items } or null (no fragment, no matches,
+   * or the cursor is inside a string literal).
+   */
+  function queryCompletions(language, textBeforeCursor) {
+    var entries = QUERY_COMPLETIONS[language];
+    if (!entries || typeof textBeforeCursor !== 'string') {
+      return null;
+    }
+    var quote = null;
+    for (var i = 0; i < textBeforeCursor.length; i++) {
+      var ch = textBeforeCursor[i];
+      if (quote) {
+        if (ch === '\\') {
+          i++;
+        } else if (ch === quote) {
+          quote = null;
+        }
+      } else if (ch === "'" || ch === '"' || ch === '`') {
+        quote = ch;
+      }
+    }
+    if (quote !== null) {
+      return null; // inside a string literal
+    }
+    var fragmentMatch = /[A-Za-z_][A-Za-z0-9_]*$/.exec(textBeforeCursor);
+    if (!fragmentMatch) {
+      return null;
+    }
+    var fragment = fragmentMatch[0];
+    var lower = fragment.toLowerCase();
+    var items = entries.filter(function (entry) {
+      var key = (entry.match || entry.label).toLowerCase();
+      return key.indexOf(lower) === 0 && key !== lower;
+    });
+    if (items.length === 0) {
+      return null;
+    }
+    return {
+      replaceFrom: textBeforeCursor.length - fragment.length,
+      fragment: fragment,
+      items: items
+    };
+  }
+
   // ----------------------------------------------------- query conversion
 
   /**
@@ -1246,6 +1388,7 @@
     jqKey: jqKey,
     clampInt: clampInt,
     convertQuery: convertQuery,
+    queryCompletions: queryCompletions,
     isBackgroundGraphRequest: isBackgroundGraphRequest,
     graphRequestMatchesEditor: graphRequestMatchesEditor,
     classifyBackgroundRequest: classifyBackgroundRequest,

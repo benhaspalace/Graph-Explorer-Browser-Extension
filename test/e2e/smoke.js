@@ -35,6 +35,15 @@ const FIXTURE_HTML = `<!DOCTYPE html>
     <input aria-label="Query sample input" id="ge-editor-input" size="60" />
     <button aria-label="Run query" id="ge-run">▶ Run query</button>
     <button aria-label="Sign in" id="fake-profile-view">(avatar)</button>
+    <span>
+      <button role="tab" aria-selected="true" id="fake-body-tab">Request body</button>
+      <button role="tab" aria-selected="false" id="request-headers">Request headers</button>
+    </span>
+    <div role="tabpanel" id="ge-headers-panel" hidden>
+      <input name="name" placeholder="Key" /> <input name="value" placeholder="Value" />
+      <button id="ge-add-header">Add</button>
+      <ul id="ge-header-list"></ul>
+    </div>
   </div>
   <div id="response-area"><div id="ge-response"><pre id="ge-json">(run a query)</pre></div></div>
 </div>
@@ -59,6 +68,24 @@ const FIXTURE_HTML = `<!DOCTYPE html>
   document.getElementById('ge-run').addEventListener('click', function () {
     var url = document.getElementById('ge-editor-input').value;
     window.runGraphQuery(url.replace('https://graph.microsoft.com', ''));
+  });
+  // Minimal stand-in for GE's Request-headers tab.
+  function selectTab(which) {
+    document.getElementById('fake-body-tab').setAttribute('aria-selected', String(which === 'body'));
+    document.getElementById('request-headers').setAttribute('aria-selected', String(which === 'headers'));
+    document.getElementById('ge-headers-panel').hidden = which !== 'headers';
+  }
+  document.getElementById('fake-body-tab').addEventListener('click', function () { selectTab('body'); });
+  document.getElementById('request-headers').addEventListener('click', function () { selectTab('headers'); });
+  document.getElementById('ge-add-header').addEventListener('click', function () {
+    var name = document.querySelector('input[name="name"]');
+    var value = document.querySelector('input[name="value"]');
+    if (!name.value) return;
+    var li = document.createElement('li');
+    li.textContent = name.value + ': ' + value.value;
+    document.getElementById('ge-header-list').appendChild(li);
+    name.value = '';
+    value.value = '';
   });
 </script>
 </body></html>`;
@@ -295,6 +322,17 @@ function check(name, ok, extra) {
     editorAfterAssist === "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'a')&$count=true",
     editorAfterAssist
   );
+  // The header rows are added through GE's Request-headers view.
+  await page.waitForTimeout(800);
+  const headerRows = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('#ge-header-list li')).map((li) => li.textContent)
+  );
+  check('ConsistencyLevel added via the headers view', headerRows.includes('ConsistencyLevel: eventual'), headerRows.join(' | '));
+  check('Content-Type added via the headers view', headerRows.includes('Content-Type: application/json'), headerRows.join(' | '));
+  check(
+    'previous tab restored after adding headers',
+    await page.evaluate(() => document.getElementById('fake-body-tab').getAttribute('aria-selected') === 'true')
+  );
   await page.locator('#ge-run').click(); // run it — the field content is what goes out
   await page.waitForTimeout(400);
   const advReq = graphRequests.find((r) => r.url.includes('%24filter') || r.url.includes('$filter'));
@@ -469,6 +507,39 @@ function check(name, ok, extra) {
   await query.fill('.value[].displayName');
   await page.waitForTimeout(400);
   check('jq iteration query works', (await page.locator('.gejq-result').innerText()).includes('Lidia Holloway'));
+
+  // 10f2. Tier-1 autocomplete in the query input.
+  await query.fill('.value | uniq');
+  await page.waitForTimeout(300);
+  const acItems = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const list = shadow.querySelector('.gejq-autocomplete');
+    return list.style.display === 'none'
+      ? null
+      : Array.from(list.querySelectorAll('.gejq-ac-label')).map((l) => l.textContent);
+  });
+  check('autocomplete dropdown offers matching builtins', !!acItems && acItems.includes('unique') && acItems.includes('unique_by('), (acItems || []).join(' | '));
+  await query.press('ArrowDown');
+  await query.press('Enter');
+  await page.waitForTimeout(200);
+  check('ArrowDown+Enter accepts the highlighted completion', (await query.inputValue()) === '.value | unique', await query.inputValue());
+  check(
+    'dropdown closes after accepting',
+    await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autocomplete').style.display === 'none')
+  );
+  await query.fill('.value | so');
+  await page.waitForTimeout(300);
+  await query.press('Escape');
+  const escState = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      dropdownHidden: shadow.querySelector('.gejq-autocomplete').style.display === 'none',
+      panelVisible: shadow.querySelector('.gejq-panel').offsetParent !== null
+    };
+  });
+  check('Escape closes the dropdown but not the panel', escState.dropdownHidden && escState.panelVisible, JSON.stringify(escState));
+  await query.fill('.value[].displayName');
+  await page.waitForTimeout(400);
 
   // 10g. CSV toggle switches the output view itself.
   await page.locator('.gejq-seg-btn', { hasText: 'CSV' }).click();

@@ -112,6 +112,7 @@
   var embedTimer = null;
   var manualCounter = 0;
   var lastRunInteraction = 0; // when the user last ran a query in Graph Explorer
+  var autocomplete = { open: false, result: null, activeIndex: 0 }; // query-input completion state
 
   // ---------------------------------------------------------------- storage
 
@@ -492,6 +493,7 @@
   /** Re-apply everything that depends on the selected query language. */
   function applyLanguage() {
     var language = LANGUAGES[state.settings.queryLanguage];
+    closeAutocomplete();
     ui.titleLabel.textContent = 'JSON Query (' + language.label + ')';
     ui.queryInput.placeholder = language.placeholder;
     if (ui.languageSelect.value !== state.settings.queryLanguage) {
@@ -768,17 +770,90 @@
     );
   }
 
+  // ------------------------------------------------------- autocomplete
+
+  function closeAutocomplete() {
+    autocomplete.open = false;
+    autocomplete.result = null;
+    ui.autocompleteList.style.display = 'none';
+  }
+
+  /** Refresh the completion dropdown from the text before the cursor. */
+  function updateAutocomplete() {
+    var input = ui.queryInput;
+    var caret = input.selectionStart;
+    if (caret === null || caret !== input.selectionEnd) {
+      closeAutocomplete();
+      return;
+    }
+    var result = GEJQ.queryCompletions(state.settings.queryLanguage, input.value.slice(0, caret));
+    if (!result) {
+      closeAutocomplete();
+      return;
+    }
+    autocomplete.open = true;
+    autocomplete.result = result;
+    autocomplete.activeIndex = 0;
+    renderAutocomplete();
+  }
+
+  function renderAutocomplete() {
+    var list = ui.autocompleteList;
+    clearChildren(list);
+    autocomplete.result.items.forEach(function (item, index) {
+      var row = el('div', 'gejq-ac-item' + (index === autocomplete.activeIndex ? ' gejq-ac-active' : ''));
+      row.appendChild(el('span', 'gejq-ac-label', item.label));
+      if (item.detail) {
+        row.appendChild(el('span', 'gejq-ac-detail', item.detail));
+      }
+      row.addEventListener('mousedown', function (event) {
+        event.preventDefault(); // keep focus in the query input
+        acceptCompletion(item);
+      });
+      list.appendChild(row);
+    });
+    list.style.display = '';
+    var active = list.children[autocomplete.activeIndex];
+    if (active && active.scrollIntoView) {
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function moveAutocomplete(delta) {
+    var count = autocomplete.result.items.length;
+    autocomplete.activeIndex = (autocomplete.activeIndex + delta + count) % count;
+    renderAutocomplete();
+  }
+
+  function acceptCompletion(item) {
+    var input = ui.queryInput;
+    var caret = input.selectionStart;
+    var before = input.value.slice(0, autocomplete.result.replaceFrom);
+    var after = input.value.slice(caret);
+    input.value = before + item.insert + after;
+    var newCaret = before.length + item.insert.length;
+    input.setSelectionRange(newCaret, newCaret);
+    state.query = input.value;
+    storageSet(STORAGE_KEY_QUERY, input.value);
+    closeAutocomplete();
+    scheduleRun();
+    input.focus();
+  }
+
   // ------------------------------------------------ advanced query assist
 
-  var HEADER_ADDED_GUARD = 'gejq.consistencyHeaderAdded';
+  var HEADER_ADDED_GUARD_PREFIX = 'gejq.headerAdded.';
 
   /**
    * Visible advanced-query assistance: when the URI field holds a GET
    * query using $filter/$search/$orderby (or $count), append $count=true
-   * to the field itself and add a `ConsistencyLevel: eventual` row via
-   * Graph Explorer's own Request-headers view. Nothing is modified
-   * behind the user's back — both changes are visible in the query view
-   * before the request runs. Triggered when the URI field loses focus.
+   * to the field itself and add `ConsistencyLevel: eventual` plus
+   * `Content-Type: application/json` rows via Graph Explorer's own
+   * Request-headers view. Nothing is modified behind the user's back —
+   * every change is visible in the query view before the request runs.
+   * Triggered when the URI field loses focus. Body-carrying methods
+   * (POST/PUT/PATCH) get the Content-Type row even without advanced
+   * query options.
    */
   function maybeAssistAdvancedQuery() {
     if (!state.settings.advancedQuery) {
@@ -789,32 +864,40 @@
       return;
     }
     var methodControl = document.querySelector('[aria-label="HTTP request method option" i]');
-    var method = methodControl && methodControl.textContent ? methodControl.textContent.trim() : 'GET';
+    var method = methodControl && methodControl.textContent ? methodControl.textContent.trim().toUpperCase() : 'GET';
     var advanced = GEJQ.applyAdvancedQuery(input.value.trim(), method);
-    if (!advanced.addHeader) {
-      return;
+    var rows = [];
+    if (advanced.addHeader) {
+      if (!/[?&]\$count=/i.test(input.value)) {
+        // Append as text so the user's own formatting stays intact.
+        setNativeInputValue(input, input.value + (input.value.indexOf('?') === -1 ? '?' : '&') + '$count=true');
+      }
+      rows.push({ name: 'ConsistencyLevel', value: 'eventual' });
     }
-    if (!/[?&]\$count=/i.test(input.value)) {
-      // Append as text so the user's own formatting stays intact.
-      setNativeInputValue(input, input.value + (input.value.indexOf('?') === -1 ? '?' : '&') + '$count=true');
+    if (advanced.addHeader || method === 'POST' || method === 'PUT' || method === 'PATCH') {
+      rows.push({ name: 'Content-Type', value: 'application/json' });
     }
-    ensureConsistencyHeaderRow();
+    if (rows.length > 0) {
+      ensureHeaderRows(rows);
+    }
   }
 
   /**
-   * Add `ConsistencyLevel: eventual` through Graph Explorer's
-   * Request-headers tab so the header is visible (and persisted by GE)
-   * exactly like a hand-entered one. Best effort: silently does nothing
-   * when the tab or its inputs can't be found, and runs at most once per
-   * tab session.
+   * Add header rows through Graph Explorer's Request-headers tab so they
+   * are visible (and persisted by GE) exactly like hand-entered ones.
+   * Best effort: silently does nothing when the tab or its inputs can't
+   * be found; each header is attempted at most once per tab session.
    */
-  function ensureConsistencyHeaderRow() {
-    try {
-      if (sessionStorage.getItem(HEADER_ADDED_GUARD)) {
-        return;
+  function ensureHeaderRows(rows) {
+    var pending = rows.filter(function (row) {
+      try {
+        return !sessionStorage.getItem(HEADER_ADDED_GUARD_PREFIX + row.name);
+      } catch (e) {
+        return true;
       }
-    } catch (e) {
-      /* ignore */
+    });
+    if (pending.length === 0) {
+      return;
     }
     var headersTab = document.getElementById('request-headers');
     if (!headersTab) {
@@ -823,27 +906,8 @@
     var previousTab = document.querySelector('[role="tab"][aria-selected="true"]');
     var restoreTab = previousTab && previousTab !== headersTab ? previousTab : null;
     headersTab.click();
-    setTimeout(function () {
-      try {
-        var nameInput = document.querySelector('input[name="name"]');
-        var valueInput = document.querySelector('input[name="value"]');
-        if (nameInput && valueInput) {
-          var panelRoot = nameInput.closest('[role="tabpanel"]') || nameInput.parentElement.parentElement;
-          if (panelRoot && panelRoot.textContent.indexOf('ConsistencyLevel') !== -1) {
-            markHeaderAdded(); // user already has the header row
-          } else {
-            setNativeInputValue(nameInput, 'ConsistencyLevel');
-            setNativeInputValue(valueInput, 'eventual');
-            var addButton = findAddButton(panelRoot || document);
-            if (addButton) {
-              addButton.click();
-              markHeaderAdded();
-            }
-          }
-        }
-      } catch (e) {
-        /* never break Graph Explorer */
-      }
+
+    function finish() {
       if (restoreTab) {
         try {
           restoreTab.click();
@@ -851,6 +915,46 @@
           /* ignore */
         }
       }
+    }
+
+    function addNext(index) {
+      if (index >= pending.length) {
+        finish();
+        return;
+      }
+      try {
+        var row = pending[index];
+        var nameInput = document.querySelector('input[name="name"]');
+        var valueInput = document.querySelector('input[name="value"]');
+        if (!nameInput || !valueInput) {
+          finish();
+          return;
+        }
+        var panelRoot = nameInput.closest('[role="tabpanel"]') || nameInput.parentElement.parentElement;
+        if (panelRoot && panelRoot.textContent.indexOf(row.name) !== -1) {
+          markHeaderAdded(row.name); // already present
+          addNext(index + 1);
+          return;
+        }
+        setNativeInputValue(nameInput, row.name);
+        setNativeInputValue(valueInput, row.value);
+        var addButton = findAddButton(panelRoot || document);
+        if (!addButton) {
+          finish();
+          return;
+        }
+        addButton.click();
+        markHeaderAdded(row.name);
+        setTimeout(function () {
+          addNext(index + 1);
+        }, 120);
+      } catch (e) {
+        finish(); // never break Graph Explorer
+      }
+    }
+
+    setTimeout(function () {
+      addNext(0);
     }, 150);
   }
 
@@ -866,9 +970,9 @@
     return null;
   }
 
-  function markHeaderAdded() {
+  function markHeaderAdded(name) {
     try {
-      sessionStorage.setItem(HEADER_ADDED_GUARD, '1');
+      sessionStorage.setItem(HEADER_ADDED_GUARD_PREFIX + name, '1');
     } catch (e) {
       /* ignore */
     }
@@ -1403,6 +1507,7 @@
       switchLanguage(languageSelect.value);
     });
     queryRow.appendChild(languageSelect);
+    var queryWrap = el('div', 'gejq-query-wrap');
     var queryInput = el('textarea', 'gejq-query-input');
     queryInput.rows = 2;
     queryInput.spellcheck = false; // placeholder is set by applyLanguage()
@@ -1410,18 +1515,47 @@
       state.query = queryInput.value;
       storageSet(STORAGE_KEY_QUERY, queryInput.value);
       scheduleRun();
+      updateAutocomplete();
     });
     // Recording happens only on deliberate runs (Enter or chip clicks) —
     // a blur handler would capture half-typed queries when the focus
     // moves to a suggestion chip.
     queryInput.addEventListener('keydown', function (event) {
+      if (autocomplete.open) {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          moveAutocomplete(event.key === 'ArrowDown' ? 1 : -1);
+          return;
+        }
+        if (event.key === 'Enter' || event.key === 'Tab') {
+          event.preventDefault();
+          acceptCompletion(autocomplete.result.items[autocomplete.activeIndex]);
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation(); // don't collapse the panel
+          closeAutocomplete();
+          return;
+        }
+      }
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         runQuery();
         recordQuery();
       }
     });
-    queryRow.appendChild(queryInput);
+    queryInput.addEventListener('blur', function () {
+      // Delayed so a mousedown on a completion row can land first.
+      setTimeout(function () {
+        closeAutocomplete();
+      }, 150);
+    });
+    var autocompleteList = el('div', 'gejq-autocomplete');
+    autocompleteList.style.display = 'none';
+    queryWrap.appendChild(queryInput);
+    queryWrap.appendChild(autocompleteList);
+    queryRow.appendChild(queryWrap);
     panel.appendChild(queryRow);
 
     var error = el('div', 'gejq-error');
@@ -1543,6 +1677,7 @@
       backgroundToggle: backgroundToggle,
       responseInfo: responseInfo,
       queryInput: queryInput,
+      autocompleteList: autocompleteList,
       error: error,
       warning: warning,
       meta: meta,

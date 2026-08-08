@@ -29,11 +29,18 @@ with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI'
   a "pinned" badge when you've selected an older response.
 - **Advanced Graph queries by default** — when the URI field holds a GET
   query using `$filter`, `$search`, or `$orderby`, the extension visibly adds
-  `$count=true` to the URI field and a `ConsistencyLevel: eventual` row to
-  Graph Explorer's Request-headers view — the pieces
+  `$count=true` to the URI field and `ConsistencyLevel: eventual` +
+  `Content-Type: application/json` rows to Graph Explorer's Request-headers
+  view — the pieces
   [Microsoft Graph advanced queries](https://learn.microsoft.com/graph/aad-advanced-queries)
-  require. Everything happens in the query view itself; requests are never
+  require. Body-carrying methods (POST/PUT/PATCH) get the Content-Type row
+  too. Everything happens in the query view itself; requests are never
   modified behind the scenes. On by default; toggle it in the settings.
+- **Query completion** — typing in the query box suggests the language's
+  functions and operators (all 26 JMESPath functions, the jq builtins the
+  bundled engine supports, JSONPath syntax snippets) in a dropdown:
+  ↑/↓ to choose, Enter/Tab to accept, Esc to dismiss. Suggestions never
+  appear inside string literals.
 - **Background-request filtering** — Graph Explorer's own calls (signed-in
   user, organization, permission grants) are kept out of the response list.
   Classification combines known-internal URL patterns, a match against the
