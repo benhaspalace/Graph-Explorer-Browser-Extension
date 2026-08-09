@@ -45,8 +45,11 @@ const FIXTURE_HTML = `<!DOCTYPE html>
     <div role="tabpanel" id="ge-headers-panel" hidden>
       <input name="name" placeholder="Key" /> <input name="value" placeholder="Value" />
       <button id="ge-add-header">Add</button>
-      <ul id="ge-header-list"></ul>
     </div>
+    <!-- Like real Graph Explorer, added header rows render OUTSIDE the
+         input's tabpanel, so the extension can't confirm a row by scanning
+         that panel — it must not re-add on every edit. -->
+    <ul id="ge-header-list"></ul>
   </div>
   <div id="response-area"><div id="ge-response"><pre id="ge-json">(run a query)</pre></div></div>
 </div>
@@ -459,6 +462,27 @@ function check(name, ok, extra) {
   check('no hidden header was injected', !!advReq && advReq.headers['consistencylevel'] === undefined);
   const plainReq = graphRequests.find((r) => r.url.includes('$top=3'));
   check('plain query left untouched', !!plainReq && !plainReq.url.includes('count') && plainReq.headers['consistencylevel'] === undefined);
+  // Regression: editing the query repeatedly (each blur re-runs the assist)
+  // must not re-add the header — it is added once per session, even though
+  // the fixture (like real GE) renders header rows outside the input panel.
+  const edits = [
+    "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'ab')",
+    "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'ab')&$select=id,displayName",
+    'https://graph.microsoft.com/v1.0/users?$select=id,displayName&$orderby=displayName'
+  ];
+  for (const q of edits) {
+    await page.evaluate((v) => {
+      const e = document.getElementById('ge-editor-input');
+      e.value = v;
+      e.focus();
+    }, q);
+    await page.locator('#ge-json').click(); // blur → runs the assist again
+    await page.waitForTimeout(300);
+  }
+  const consistencyCount = await page.evaluate(
+    () => Array.from(document.querySelectorAll('#ge-header-list li')).filter((li) => li.textContent.indexOf('ConsistencyLevel') === 0).length
+  );
+  check('ConsistencyLevel added only once across query edits', consistencyCount === 1, 'count=' + consistencyCount);
   // A plain query must not be touched when leaving the field either.
   await page.evaluate(() => {
     const editor = document.getElementById('ge-editor-input');
