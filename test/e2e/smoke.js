@@ -327,6 +327,35 @@ function check(name, ok, extra) {
   // non-static value proves the stylesheet reached the shadow root.
   check('CM: stylesheet applied inside the shadow root', cmStyled.announce !== 'static' && cmStyled.announce !== 'missing', JSON.stringify(cmStyled));
   check('CM: highlights tokens', cmStyled.highlightSpans > 0, JSON.stringify(cmStyled));
+  // Brackets are their own colored token (color-coding), and the matched
+  // pair is emphasized with weight/color rather than a background box that
+  // would sit over the caret. Type value[0] so the caret lands right after
+  // the ] — that is when CodeMirror renders .cm-matchingBracket.
+  await query.click();
+  await page.keyboard.press('Control+A');
+  await page.keyboard.press('Delete');
+  await page.keyboard.type('value[0]');
+  await page.waitForTimeout(200);
+  const bracketStyle = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const spans = Array.from(shadow.querySelectorAll('.gejq-query-editor .cm-line span[class]'));
+    const bracketSpan = spans.find((s) => /^[()[\]{}]+$/.test(s.textContent));
+    const match = shadow.querySelector('.gejq-query-editor .cm-matchingBracket');
+    return {
+      bracketColored: !!bracketSpan,
+      matchFound: !!match,
+      matchBg: match ? getComputedStyle(match).backgroundColor : '',
+      matchWeight: match ? getComputedStyle(match).fontWeight : ''
+    };
+  });
+  check('CM: brackets get their own colored token', bracketStyle.bracketColored, JSON.stringify(bracketStyle));
+  check(
+    'CM: matched bracket uses weight, not a caret-covering box',
+    bracketStyle.matchFound &&
+      (bracketStyle.matchBg === 'rgba(0, 0, 0, 0)' || bracketStyle.matchBg === 'transparent') &&
+      Number(bracketStyle.matchWeight) >= 700,
+    JSON.stringify(bracketStyle)
+  );
 
   await query.fill('value[].{name: displayName, email: mail}');
   await page.waitForTimeout(400);

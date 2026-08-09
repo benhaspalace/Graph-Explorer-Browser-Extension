@@ -1142,7 +1142,9 @@
         if (assistTimer) {
           clearTimeout(assistTimer);
         }
-        assistTimer = setTimeout(maybeAssistAdvancedQuery, 400);
+        assistTimer = setTimeout(function () {
+          maybeAssistAdvancedQuery(false); // typing: $count only, no focus steal
+        }, 400);
       },
       true
     );
@@ -1150,7 +1152,7 @@
       'blur',
       function (event) {
         if (event.target === findEditorInput()) {
-          maybeAssistAdvancedQuery();
+          maybeAssistAdvancedQuery(true); // leaving the field: safe to add headers
         }
       },
       true
@@ -1235,6 +1237,11 @@
   // ------------------------------------------------ advanced query assist
 
   var HEADER_ADDED_GUARD_PREFIX = 'gejq.headerAdded.';
+  // Names whose row is being added right now. The session guard is only set
+  // *after* an add is verified, so without this lock two overlapping assist
+  // runs (e.g. startup + blur) could each add ConsistencyLevel before either
+  // marked it done — producing duplicate rows.
+  var headersInFlight = {};
 
   /** Poll `condition` every 150ms (up to `tries`); success → onSuccess(result), else onFail(). */
   function waitForCondition(condition, tries, onSuccess, onFail) {
@@ -1316,11 +1323,18 @@
    * plus `Content-Type: application/json` rows via Graph Explorer's own
    * Request-headers view. Nothing is modified behind the user's back —
    * every change lands in the query view before the request runs.
-   * Triggered while typing (debounced) and when the field loses focus.
-   * Body-carrying methods (POST/PUT/PATCH) get the Content-Type row
-   * even without advanced query options.
+   *
+   * While the user is *typing* (fromBlur = false) only the in-field
+   * $count=true insertion runs — adding header rows there would switch to
+   * the Request-headers tab and hand focus back with a stale caret, which
+   * bounced the cursor back a few characters mid-filter. Header rows are
+   * added once when Graph Explorer opens (scheduleStartupHeaders) and
+   * re-ensured when the field loses focus or the query is run (fromBlur =
+   * true), when stealing focus is harmless. Body-carrying methods
+   * (POST/PUT/PATCH) get the Content-Type row even without advanced query
+   * options.
    */
-  function maybeAssistAdvancedQuery() {
+  function maybeAssistAdvancedQuery(fromBlur) {
     if (!state.settings.advancedQuery) {
       return;
     }
@@ -1331,11 +1345,14 @@
     var methodControl = document.querySelector('[aria-label="HTTP request method option" i]');
     var method = methodControl && methodControl.textContent ? methodControl.textContent.trim().toUpperCase() : 'GET';
     var advanced = GEJQ.applyAdvancedQuery(input.value.trim(), method);
+    if (advanced.addHeader && !/[?&]\$count=/i.test(input.value)) {
+      insertCountIntoEditor(input);
+    }
+    if (!fromBlur) {
+      return; // never touch the headers tab while the user is typing
+    }
     var rows = [];
     if (advanced.addHeader) {
-      if (!/[?&]\$count=/i.test(input.value)) {
-        insertCountIntoEditor(input);
-      }
       rows.push({ name: 'ConsistencyLevel', value: 'eventual' });
     }
     if (advanced.addHeader || method === 'POST' || method === 'PUT' || method === 'PATCH') {
@@ -1382,6 +1399,9 @@
   function ensureHeaderRows(rows, options) {
     var force = options && options.force === true;
     var pending = rows.filter(function (row) {
+      if (headersInFlight[row.name]) {
+        return false; // an add for this header is already running
+      }
       if (force) {
         return true; // restore regardless of this session's earlier assists
       }
@@ -1394,6 +1414,9 @@
     if (pending.length === 0) {
       return;
     }
+    pending.forEach(function (row) {
+      headersInFlight[row.name] = true;
+    });
     var headersTab = findHeadersTab();
     if (!headersTab) {
       return;
@@ -1408,6 +1431,9 @@
     headersTab.click();
 
     function finish() {
+      pending.forEach(function (row) {
+        delete headersInFlight[row.name];
+      });
       if (restoreTab) {
         try {
           restoreTab.click();
@@ -2233,7 +2259,8 @@
       { tag: cm.tags.keyword, color: 'var(--gejq-tok-keyword)' },
       { tag: cm.tags.operator, color: 'var(--gejq-tok-operator)' },
       { tag: cm.tags.variableName, color: 'var(--gejq-tok-variable)' },
-      { tag: cm.tags.propertyName, color: 'var(--gejq-tok-property)' }
+      { tag: cm.tags.propertyName, color: 'var(--gejq-tok-property)' },
+      { tag: cm.tags.bracket, color: 'var(--gejq-tok-bracket)' }
     ]);
     function streamLanguage(languageKey) {
       return cm.StreamLanguage.define({
@@ -2452,7 +2479,7 @@
     responseText.placeholder = 'Waiting for Graph responses…';
     responseText.title = 'The response being queried (selectable)';
     historyRow.appendChild(responseText);
-    var historySelect = el('select', 'gejq-history-select');
+    var historySelect = el('select', 'gejq-history-select gejq-response-select');
     historySelect.title = 'Captured Graph responses (newest first)';
     historySelect.setAttribute('aria-label', 'Captured Graph responses');
     historySelect.addEventListener('change', function () {
