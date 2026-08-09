@@ -360,7 +360,7 @@ test('upsertQueryHistory preserves stars and tags across re-runs', () => {
   assert.deepEqual(history[0].tags, ['users']);
 });
 
-test('trimQueryHistoryList removes oldest unstarred entries first', () => {
+test('trimQueryHistoryList caps non-favorites and keeps all favorites', () => {
   const entries = [
     { query: 'q5', starred: false },
     { query: 'q4', starred: true },
@@ -368,11 +368,22 @@ test('trimQueryHistoryList removes oldest unstarred entries first', () => {
     { query: 'q2', starred: true },
     { query: 'q1', starred: false }
   ];
-  const trimmed = GEJQ.trimQueryHistoryList(entries, 3);
-  assert.deepEqual(trimmed.map((e) => e.query), ['q5', 'q4', 'q2']);
+  // The limit applies to NON-favorites only (newest first): keep q5, q3 of
+  // the three unstarred, drop the oldest unstarred q1; both favorites stay.
+  const trimmed = GEJQ.trimQueryHistoryList(entries, 2);
+  assert.deepEqual(trimmed.map((e) => e.query), ['q5', 'q4', 'q3', 'q2']);
+  // The newest query is always kept even when favorites are plentiful — the
+  // bug this fixes: favorites must never crowd out a freshly-run query.
+  const manyFavs = [
+    { query: 'new', starred: false },
+    { query: 'f1', starred: true },
+    { query: 'f2', starred: true },
+    { query: 'f3', starred: true }
+  ];
+  assert.ok(GEJQ.trimQueryHistoryList(manyFavs, 1).some((e) => e.query === 'new'));
   // Favorites are never dropped, even when they alone exceed the limit.
   const allStarred = [{ query: 'a', starred: true }, { query: 'b', starred: true }];
-  assert.deepEqual(GEJQ.trimQueryHistoryList(allStarred, 1).length, 2);
+  assert.equal(GEJQ.trimQueryHistoryList(allStarred, 1).length, 2);
   assert.equal(GEJQ.trimQueryHistoryList(entries, 0), entries);
 });
 
@@ -444,6 +455,21 @@ test('property completions resolve keys from the response JSON', () => {
   assert.equal(GEJQ.queryCompletions('jmespath', 'nosuch.', SAMPLE_USERS_RESPONSE), null);
   // Without JSON, Tier-1 still works.
   assert.ok(GEJQ.queryCompletions('jmespath', 'sor').items.length >= 2);
+});
+
+test('property completions resolve after filter brackets and jq pipes', () => {
+  // JMESPath: member access after a filter predicate (which the strict
+  // parser rejects) still completes by sampling the filtered array's items.
+  const afterFilter = GEJQ.queryCompletions('jmespath', "value[?jobTitle == 'Auditor'].disp", SAMPLE_USERS_RESPONSE);
+  assert.ok(afterFilter && afterFilter.items.map((i) => i.label).includes('displayName'), 'jmespath filter-member');
+  const afterFilterBacktick = GEJQ.queryCompletions('jmespath', 'value[?jobTitle == `x`].m', SAMPLE_USERS_RESPONSE);
+  assert.ok(afterFilterBacktick && afterFilterBacktick.items.map((i) => i.label).includes('mail'), 'jmespath backtick filter-member');
+  // jq: member access after a pipe completes against the piped stage.
+  const afterPipe = GEJQ.queryCompletions('jq', '.value[] | .disp', SAMPLE_USERS_RESPONSE);
+  assert.ok(afterPipe && afterPipe.items.map((i) => i.label).includes('displayName'), 'jq pipe-member');
+  // JSONPath: member access after a filter predicate.
+  const jsonFilter = GEJQ.queryCompletions('jsonpath', "$.value[?(@.jobTitle == 'Auditor')].disp", SAMPLE_USERS_RESPONSE);
+  assert.ok(jsonFilter && jsonFilter.items.map((i) => i.label).includes('displayName'), 'jsonpath filter-member');
 });
 
 test('queryCompletions matches identifier fragments per language', () => {

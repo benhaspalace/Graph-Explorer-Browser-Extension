@@ -103,7 +103,8 @@ status for this branch.
   library between browsers as a JSON file (imports merge, keeping stars,
   names, and tags).
 - **Smart suggestions** — one-click query chips generated from the shape of
-  the current response in the selected language, plus a built-in cheat sheet.
+  the current response in the selected language, with a link to the
+  language's documentation in the same section.
 - **JSON, table, or tree view** — a three-way switch in the footer changes
   how the result renders, and the top-right of the result always shows its
   length and size. **CSV** renders the result as a real table: click a

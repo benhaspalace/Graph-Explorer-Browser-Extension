@@ -420,7 +420,7 @@ function check(name, ok, extra) {
   await query.fill('value[].displayName');
   await page.waitForTimeout(400);
 
-  const meta = await page.locator('.gejq-meta').first().innerText();
+  const meta = await page.locator('.gejq-meta-right').innerText();
   check('meta line describes result', meta.includes('array'), meta);
 
   // Advanced-query setting (default on): leaving the URI field with a
@@ -743,7 +743,7 @@ function check(name, ok, extra) {
   await page.waitForTimeout(300);
   const csvView = await page.locator('.gejq-result').innerText();
   check('CSV view renders CSV text', csvView.startsWith('value') && csvView.includes('Adele Vance'), csvView.slice(0, 40));
-  check('meta marks table view', (await page.locator('.gejq-meta').first().innerText()).includes('table view'));
+  check('meta marks table view', (await page.locator('.gejq-meta-right').innerText()).includes('table view'));
   await page.locator('.gejq-seg-btn', { hasText: 'JSON' }).click();
   await page.waitForTimeout(200);
   check('JSON view restored', (await page.locator('.gejq-result').innerText()).trim().startsWith('['));
@@ -920,7 +920,7 @@ function check(name, ok, extra) {
     };
   });
   check('CSV mode renders a table', tableState.exists && tableState.rows === 6, JSON.stringify(tableState.headers));
-  check('length readout shown top-right', tableState.metaRight.includes('length: 6'), tableState.metaRight);
+  check('size/count readout shown top-right', tableState.metaRight.includes('6 items') && tableState.metaRight.includes('table view'), tableState.metaRight);
   const clickHeader = (dirLabel) =>
     page.evaluate(() => {
       const shadow = document.getElementById('gejq-host').shadowRoot;
@@ -1028,7 +1028,7 @@ function check(name, ok, extra) {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     return {
       rows: shadow.querySelectorAll('.gejq-result .gejq-diff-row').length,
-      meta: shadow.querySelector('.gejq-meta').textContent,
+      meta: shadow.querySelector('.gejq-meta-right').textContent,
       baselineOptions: shadow.querySelectorAll('.gejq-diff-select option').length
     };
   });
