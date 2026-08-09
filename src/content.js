@@ -36,7 +36,7 @@
   var DEFAULT_SETTINGS = Object.freeze({
     advancedQuery: true,
     autoSignIn: true,
-    autoFetchNextLink: false,
+    autoFetchNextLink: true,
     autoFetchMaxPages: 50,
     autoFetchMaxMb: 10,
     queryLanguage: 'jmespath',
@@ -766,7 +766,7 @@
     return {
       advancedQuery: !raw || raw.advancedQuery !== false,
       autoSignIn: !raw || raw.autoSignIn !== false,
-      autoFetchNextLink: !!raw && raw.autoFetchNextLink === true,
+      autoFetchNextLink: !raw || raw.autoFetchNextLink !== false,
       autoFetchMaxPages: GEJQ.clampInt(raw && raw.autoFetchMaxPages, 1, 1000, DEFAULT_SETTINGS.autoFetchMaxPages),
       autoFetchMaxMb: GEJQ.clampInt(raw && raw.autoFetchMaxMb, 1, 50, DEFAULT_SETTINGS.autoFetchMaxMb),
       queryLanguage: raw && LANGUAGES[raw.queryLanguage] ? raw.queryLanguage : DEFAULT_SETTINGS.queryLanguage,

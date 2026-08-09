@@ -16,10 +16,11 @@ within a few business days.
 ## Security model
 
 - **Runs entirely locally.** The extension makes **no network requests of its
-  own**. The only exception is the *opt-in* auto-fetch feature, which requests
-  the next pages of the *same* Microsoft Graph query the user already ran, and
-  only after verifying the target is a Microsoft Graph host. There is **no
-  telemetry, analytics, or phone-home** of any kind.
+  own**. The only exception is the auto-fetch feature (**on by default; can be
+  turned off** in the settings or by policy), which requests the next pages of
+  the *same* Microsoft Graph query the user already ran, and only after
+  verifying the target is a Microsoft Graph host. There is **no telemetry,
+  analytics, or phone-home** of any kind.
 - **The network interceptor is observe-only.** It wraps `fetch`/`XHR` to read
   Graph JSON responses for display; it never rewrites requests or responses.
 - **No credentials are read or stored.** Captured request headers are
@@ -105,9 +106,12 @@ node ../../scripts/verify-vendor.js   # or diff vendor/*.js against SBOM.md
 - Distribute via your organization's **enterprise force-install policy**
   (Chrome/Edge `ExtensionInstallForcelist` / self-hosted CRX) rather than
   ad-hoc load-unpacked, so integrity is enforced by the browser.
-- Because auto-fetch is the only feature that makes network calls and is
-  **off by default**, you can keep it off by policy if any outbound request
-  beyond the user's own Graph query is unacceptable.
+- Auto-fetch is the only feature that makes network calls, and it is now
+  **on by default** (it follows `@odata.nextLink` to Microsoft Graph hosts to
+  page through the user's own query). If any outbound request beyond the exact
+  request the user ran is unacceptable, **turn it off** — in the settings, or
+  by seeding `chrome.storage.local` `gejq.settings.autoFetchNextLink = false`
+  via managed policy.
 - Review the requested permission (`storage`) and host scope
   (`developer.microsoft.com`) against your policy; both are intentionally
   minimal.

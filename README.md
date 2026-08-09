@@ -72,14 +72,15 @@ status for this branch.
 - **Automatic sign-in** — opening Graph Explorer while signed out clicks the
   profile view for you to start the sign-in flow (on by default; your browser
   may ask you to allow the sign-in popup).
-- **Auto-fetch all pages** *(opt-in)* — follow the `@odata.nextLink` chain and
-  add the combined dataset to the response list, so you can query the entire
-  result set at once. While pages stream in, the panel shows a live progress
-  line (pages · items · size) with a **Cancel** link that keeps what was
-  fetched so far. The page-count and data-size limits are configurable
+- **Auto-fetch all pages** *(on by default)* — follow the `@odata.nextLink`
+  chain and add the combined dataset to the response list, so you can query
+  the entire result set at once. While pages stream in, the panel shows a live
+  progress line (pages · items · size) with a **Cancel** link that keeps what
+  was fetched so far. The page-count and data-size limits are configurable
   (defaults: 50 pages / 10 MB); if a query exceeds them the combined entry is
   marked *incomplete* and the panel shows a warning. The extension replays the
   original request's own headers for the follow-up pages; nothing is stored.
+  Turn it off in the settings if you want only the exact request you ran.
 - **Response history** — the last 25 Graph responses are kept (in memory
   only); pick any of them from the dropdown to query it.
 - **Query history** — queries you run (Enter, or clicking a suggestion) are
@@ -187,11 +188,33 @@ Click the toolbar icon to open the settings popup:
 | Query language | JMESPath | JMESPath, JSONPath, or jq (also switchable in the panel) |
 | Advanced queries | on | Visibly adds `$count=true` (URI field) + `ConsistencyLevel: eventual` (Request headers view) for `$filter`/`$search`/`$orderby` queries |
 | Auto sign-in | on | Starts the sign-in flow when you open Graph Explorer signed out |
-| Auto-fetch all pages | off | Follows `@odata.nextLink` and adds the combined dataset to the response list |
+| Auto-fetch all pages | on | Follows `@odata.nextLink` and adds the combined dataset to the response list (turn off to make only the exact request you ran) |
 | Auto-fetch limits | 50 pages / 10 MB | Stops the chain at these limits; the panel warns when a dataset was cut off |
 | Show background requests | off | Reveal Graph Explorer's own requests in the response list (marked ⚙) |
 | Syntax-highlighting query editor | on | CodeMirror editor (highlighting, bracket matching, undo); turn off for a plain text box |
 | Query history limit | 50 | How many distinct queries to keep (checkbox for unlimited) |
+
+### Choosing a query language
+
+All three are switchable any time (the selector next to the query box or the
+settings), and switching auto-converts simple path queries. Pick by task:
+
+| | JMESPath *(default)* | JSONPath | jq |
+| --- | --- | --- | --- |
+| **Strengths** | Reshape/project into new objects (`{name: displayName}`), ~26 functions, sort/count; same language as Azure CLI `--query` | Recursive search (`..`) anywhere in the tree; **regex** in filters; simple selection syntax | Most expressive: pipelines, `map`/`select`/`reduce`/`group_by`, arithmetic, string interpolation, build any output shape |
+| **Limitations** | No regex; string tests limited to `contains`/`starts_with`/`ends_with` | **Selection only** — can't reshape or compute new values; result is always the flat array of matches; no `=~` operator | Bundled engine is **core jq only** (jqts) — not every builtin, and **no regex** (`test`/`match`/`gsub` unavailable) |
+| **Best for** | Everyday pluck / filter / reshape / count | Finding & filtering nodes, deep search, regex matching | Complex reshaping and aggregation |
+| **Regex?** | ❌ | ✅ `$.value[?(@.mail.match(/@contoso\.com$/))]` | ❌ |
+| **Example** | `value[?jobTitle == 'Auditor'].{name: displayName, email: mail}` | `$.value[?(@.jobTitle == 'Auditor')].displayName` | `.value \| map(select(.jobTitle == "Auditor")) \| .[].displayName` |
+
+Rules of thumb: reach for **JMESPath** to pull fields into a tidy shape,
+**JSONPath** when you need regex or to search deep in the tree, and **jq**
+when you need real transformation or aggregation. Note that **regex lives
+only in JSONPath** today — it works inside filter predicates (`[?(…)]`) via
+`@.field.match(/…/)` or `/…/.test(@.field)`, and runs under the extension's
+strict Content-Security-Policy because jsonpath-plus uses a safe,
+`eval`-free evaluator. The bundled jq (jqts) covers core jq but omits the
+regex builtins.
 
 ### Query examples (JMESPath)
 
@@ -205,8 +228,10 @@ Click the toolbar icon to open the settings popup:
 | `value[?jobTitle == 'Auditor'].mail \| [0]` | Filter, project, take first |
 | `"@odata.nextLink"` | Read a key containing special characters |
 
-See the [JMESPath tutorial](https://jmespath.org/tutorial.html) and the
-[JSONPath syntax reference](https://github.com/JSONPath-Plus/JSONPath#syntax-through-examples).
+See the [JMESPath tutorial](https://jmespath.org/tutorial.html), the
+[JSONPath syntax reference](https://github.com/JSONPath-Plus/JSONPath#syntax-through-examples),
+and the [jq manual](https://jqlang.github.io/jq/manual/) (note the bundled
+engine covers core jq, without the regex builtins).
 
 ## How it works
 
@@ -214,7 +239,8 @@ See the [JMESPath tutorial](https://jmespath.org/tutorial.html) and the
   wraps `window.fetch`/`XMLHttpRequest`. JSON responses from Microsoft Graph
   endpoints are forwarded to the content script via `window.postMessage`.
   It observes requests only — it never modifies them; the sole extra traffic
-  is the opt-in `@odata.nextLink` auto-fetch.
+  is the `@odata.nextLink` auto-fetch (on by default; can be turned off), and
+  it only ever targets Microsoft Graph hosts.
 - `src/content.js` renders the panel inside a ShadowRoot and embeds it into
   Graph Explorer's results area (`#response-area`), splitting it 50/50. A
   `MutationObserver` re-attaches the panel whenever Graph Explorer's React app
@@ -235,9 +261,10 @@ See the [JMESPath tutorial](https://jmespath.org/tutorial.html) and the
 ### Privacy
 
 Everything runs locally in your browser. The extension makes no network
-requests of its own — the only exception is the opt-in auto-fetch feature,
-which requests the *next pages of the same Graph query* by replaying that
-request's own headers; they are never read, stored, or sent elsewhere.
+requests of its own — the only exception is the auto-fetch feature (on by
+default; can be turned off), which requests the *next pages of the same Graph
+query* by replaying that request's own headers to Microsoft Graph hosts only;
+they are never read, stored, or sent elsewhere.
 Captured responses live only in the page's memory (cleared on reload). What is
 persisted via `chrome.storage.local`: your settings, your last query text,
 panel state, and the query history (query text, language, timestamp, and the
@@ -323,7 +350,6 @@ SBOM.md                Software bill of materials
 
 - Full jq builtin coverage via a WASM build of real jq (the bundled jqts
   engine covers core jq features).
-- Named saved queries shared across devices via `chrome.storage.sync`.
 
 ## License
 
