@@ -524,7 +524,11 @@
   // the candidate scanned backwards from the cursor.
   var PATH_CHARS = /[A-Za-z0-9_.\[\]"'@:$*-]/;
 
-  /** The trailing path-like run before the cursor (quotes skipped whole). */
+  /** The trailing path-like run before the cursor. Complete quoted spans
+   *  and complete `[...]` bracket groups are skipped whole, so a member
+   *  access after a filter — `value[?age > `18`].na` — keeps the whole
+   *  `value[?…]` as its base instead of stopping at a space or backtick
+   *  inside the brackets. */
   function extractPathCandidate(text) {
     var i = text.length - 1;
     while (i >= 0) {
@@ -540,6 +544,35 @@
           break;
         }
         i = j - 1;
+      } else if (ch === ']') {
+        // Jump back to the matching '[', skipping nested brackets and any
+        // quoted spans (which may themselves contain '[' or ']').
+        var depth = 1;
+        var m = i - 1;
+        while (m >= 0 && depth > 0) {
+          var cm = text[m];
+          if (cm === '"' || cm === "'") {
+            var k = m - 1;
+            while (k >= 0 && !(text[k] === cm && text[k - 1] !== '\\')) {
+              k--;
+            }
+            m = k - 1;
+            continue;
+          }
+          if (cm === ']') {
+            depth++;
+          } else if (cm === '[') {
+            depth--;
+            if (depth === 0) {
+              break;
+            }
+          }
+          m--;
+        }
+        if (depth !== 0) {
+          break; // unbalanced — stop before this ']'
+        }
+        i = m - 1; // continue scanning before the matching '['
       } else if (PATH_CHARS.test(ch)) {
         i--;
       } else {
@@ -626,7 +659,19 @@
       if (candidate[0] !== '.') {
         return null;
       }
-      values = base === '' || base === '.' ? [json] : resolveFromParser(parseJqQuery, base, json);
+      if (base === '' || base === '.') {
+        // A member right after a pipe — `.value[] | .frag` — completes
+        // against the output of the stage left of the last pipe.
+        var beforeCandidate = textBeforeCursor.slice(0, textBeforeCursor.length - candidate.length);
+        if (beforeCandidate.replace(/\s+$/, '').slice(-1) === '|') {
+          var leftPath = extractPathCandidate(beforeCandidate.replace(/\s*\|\s*$/, ''));
+          values = leftPath === '' ? [json] : resolveFromParser(parseJqQuery, leftPath, json);
+        } else {
+          values = [json];
+        }
+      } else {
+        values = resolveFromParser(parseJqQuery, base, json);
+      }
     } else if (language === 'jsonpath') {
       if (candidate[0] !== '$') {
         return null;
@@ -681,9 +726,16 @@
   }
 
   function resolveFromParser(parser, base, json) {
+    // For completion we only need the array's items, so a filter predicate
+    // is equivalent to a wildcard — and the strict parsers reject many
+    // predicates (e.g. `[?a == `b`]`). Normalize filters to wildcards so a
+    // member access after a filter still resolves.
+    var normalized = base
+      .replace(/\[\?\([^)]*\)\]/g, '[*]') // JSONPath [?(...)] → wildcard
+      .replace(/\[\?[^\]]*\]/g, '[]'); // JMESPath [?...] → wildcard
     var model;
     try {
-      model = parser(base);
+      model = parser(normalized);
     } catch (e) {
       model = null;
     }
@@ -1533,13 +1585,24 @@
    * entries are never removed automatically.
    */
   function trimQueryHistoryList(list, limit) {
-    if (!limit || limit <= 0 || !Array.isArray(list) || list.length <= limit) {
+    if (!limit || limit <= 0 || !Array.isArray(list)) {
       return list;
     }
-    var out = list.slice();
-    for (var i = out.length - 1; i >= 0 && out.length > limit; i--) {
-      if (!out[i].starred) {
-        out.splice(i, 1);
+    // Favorites are fully exempt: keep every starred entry, and cap only the
+    // NON-favorites to `limit` (newest first). Capping the combined length
+    // instead meant a full set of favorites could crowd out — and instantly
+    // trim — every newly-run query.
+    var out = [];
+    var nonFavorites = 0;
+    for (var i = 0; i < list.length; i++) {
+      if (!list[i]) {
+        continue;
+      }
+      if (list[i].starred) {
+        out.push(list[i]);
+      } else if (nonFavorites < limit) {
+        out.push(list[i]);
+        nonFavorites++;
       }
     }
     return out;

@@ -449,20 +449,32 @@
     });
   }
 
+  /** The newest "real" (non-manual) response — what "live" follows, so a
+   *  pinned-result snapshot sitting at the top of the list never hijacks it. */
+  function newestLiveResponse(list) {
+    for (var i = 0; i < list.length; i++) {
+      if (!list[i].manual) {
+        return list[i];
+      }
+    }
+    return list[0];
+  }
+
   function selectedResponse() {
     var list = visibleResponses();
     if (list.length === 0) {
       return null;
     }
-    if (state.followLatest || state.selectedId === null) {
-      return list[0];
-    }
-    for (var i = 0; i < list.length; i++) {
-      if (list[i].id === state.selectedId) {
-        return list[i];
+    // selectedId is the source of truth for what's shown; fall back to the
+    // newest live response when nothing is selected or the selection is gone.
+    if (state.selectedId !== null) {
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === state.selectedId) {
+          return list[i];
+        }
       }
     }
-    return list[0];
+    return newestLiveResponse(list);
   }
 
   /** Evaluate `query` against `json` in the selected query language. */
@@ -507,14 +519,17 @@
       ui.responseText.value = '';
       return;
     }
-    var live = state.followLatest;
+    // "Live" only when the shown response is the newest real (non-manual)
+    // one — a pasted/pinned snapshot or an older selection reads "pinned".
+    var newest = newestLiveResponse(visibleResponses());
+    var live = !response.manual && !!newest && newest.id === response.id;
     ui.liveBadge.style.display = '';
     ui.liveBadge.textContent = live ? '● live' : 'pinned';
     ui.liveBadge.classList.toggle('gejq-live', live);
     ui.liveBadge.title = live
       ? 'Following the latest response: the query re-runs automatically whenever a new Graph query executes'
       : 'Pinned to this response — pick the newest entry in the dropdown to follow new responses again';
-    var status = response.manual ? 'pasted' : '→ ' + response.status;
+    var status = response.manual ? (response.method === 'PASTE' ? 'pasted' : '') : '→ ' + response.status;
     if (response.pages) {
       status += ' · ' + response.pages + ' pages' + (response.truncated ? ', incomplete' : '');
     }
@@ -601,27 +616,15 @@
       return;
     }
     var rendered = renderResult(outcome.value);
-    ui.meta.textContent =
+    // Single readout on the right: type · count · size (· view). The count
+    // (items/keys/chars) that used to sit on the left is folded in here, so
+    // there is no redundant second count.
+    ui.meta.textContent = '';
+    ui.metaRight.textContent =
       GEJQ.describeResult(outcome.value) +
+      (rendered.size > 0 ? ' · ' + GEJQ.formatBytes(rendered.size) : '') +
       (rendered.mode === 'csv' ? ' · table view' : rendered.mode === 'tree' ? ' · tree view' : '');
-    ui.metaRight.textContent = lengthLabel(outcome.value, rendered.size);
     updateExportButtons(outcome);
-  }
-
-  /** "length: 13 · 4.2 KB" readout for the top-right of the results. */
-  function lengthLabel(value, size) {
-    var parts = [];
-    if (Array.isArray(value)) {
-      parts.push('length: ' + value.length);
-    } else if (value !== null && typeof value === 'object') {
-      parts.push('keys: ' + Object.keys(value).length);
-    } else if (typeof value === 'string') {
-      parts.push('chars: ' + value.length);
-    }
-    if (size > 0) {
-      parts.push(GEJQ.formatBytes(size));
-    }
-    return parts.join(' · ');
   }
 
   /** Compare mode: the current query applied to baseline vs selected. */
@@ -636,8 +639,8 @@
       }
     }
     if (!baseline || baseline.id === response.id) {
-      ui.meta.textContent = 'Compare: pick a baseline response below';
-      ui.metaRight.textContent = '';
+      ui.meta.textContent = '';
+      ui.metaRight.textContent = 'Compare: pick a baseline response below';
       state.diffText = '';
       output.appendChild(el('div', 'gejq-empty', 'Pick a different response in the "vs" dropdown to compare against.'));
       return;
@@ -651,8 +654,8 @@
       return;
     }
     var diffs = GEJQ.diffJson(baseValue, currentValue, 500);
-    ui.meta.textContent = diffs.length + ' difference(s) vs baseline';
-    ui.metaRight.textContent = '';
+    ui.meta.textContent = '';
+    ui.metaRight.textContent = diffs.length + ' difference(s) vs baseline';
     var lines = [];
     if (diffs.length === 0) {
       output.appendChild(el('div', 'gejq-empty', 'No differences between the two results.'));
@@ -825,7 +828,7 @@
     if (ui.languageSelect.value !== state.settings.queryLanguage) {
       ui.languageSelect.value = state.settings.queryLanguage;
     }
-    rebuildHelp();
+    renderSuggestionHelp();
     runQuery();
   }
 
@@ -1013,8 +1016,12 @@
     }
     manualCounter += 1;
     var label = state.query.trim() === '' ? '@' : state.query.trim();
+    var id = 'result-' + Date.now() + '-' + manualCounter;
+    // Select the snapshot so it's shown now (badge reads "pinned" because
+    // it's a manual entry). followLatest stays on so running a new Graph
+    // query afterwards resumes the live view; the pin remains in the list.
     addResponse({
-      id: 'result-' + Date.now() + '-' + manualCounter,
+      id: id,
       method: 'RESULT',
       url: 'pinned result #' + manualCounter + ' of ' + (label.length > 50 ? label.slice(0, 50) + '…' : label),
       status: 0,
@@ -1023,7 +1030,8 @@
       json: outcome.value,
       size: JSON.stringify(outcome.value) ? JSON.stringify(outcome.value).length : 0
     });
-    state.followLatest = true;
+    state.selectedId = id;
+    refreshHistorySelect();
     setQuery('');
   }
 
@@ -1031,7 +1039,9 @@
     state.responses.unshift(entry);
     state.responses = GEJQ.trimHistory(state.responses, MAX_HISTORY);
     var visible = !entry.background || state.settings.showBackgroundRequests;
-    if (state.followLatest && visible) {
+    // Keep the selection on the newest live response while following, but
+    // never auto-jump onto a manual pinned-result snapshot.
+    if (state.followLatest && visible && !entry.manual) {
       state.selectedId = entry.id;
     }
     if (ui) {
@@ -1064,8 +1074,9 @@
   function renderSuggestions(json) {
     var container = ui.suggestions;
     clearChildren(container);
+    // The section stays visible for the documentation reference even when
+    // there are no data-driven suggestions (e.g. a scalar result).
     var queries = GEJQ.suggestQueries(json, state.settings.queryLanguage);
-    ui.suggestionsDetails.style.display = queries.length === 0 ? 'none' : '';
     if (queries.length === 0) {
       return;
     }
@@ -1142,7 +1153,9 @@
         if (assistTimer) {
           clearTimeout(assistTimer);
         }
-        assistTimer = setTimeout(maybeAssistAdvancedQuery, 400);
+        assistTimer = setTimeout(function () {
+          maybeAssistAdvancedQuery(false); // typing: $count only, no focus steal
+        }, 400);
       },
       true
     );
@@ -1150,7 +1163,7 @@
       'blur',
       function (event) {
         if (event.target === findEditorInput()) {
-          maybeAssistAdvancedQuery();
+          maybeAssistAdvancedQuery(true); // leaving the field: safe to add headers
         }
       },
       true
@@ -1235,6 +1248,11 @@
   // ------------------------------------------------ advanced query assist
 
   var HEADER_ADDED_GUARD_PREFIX = 'gejq.headerAdded.';
+  // Names whose row is being added right now. The session guard is only set
+  // *after* an add is verified, so without this lock two overlapping assist
+  // runs (e.g. startup + blur) could each add ConsistencyLevel before either
+  // marked it done — producing duplicate rows.
+  var headersInFlight = {};
 
   /** Poll `condition` every 150ms (up to `tries`); success → onSuccess(result), else onFail(). */
   function waitForCondition(condition, tries, onSuccess, onFail) {
@@ -1316,11 +1334,18 @@
    * plus `Content-Type: application/json` rows via Graph Explorer's own
    * Request-headers view. Nothing is modified behind the user's back —
    * every change lands in the query view before the request runs.
-   * Triggered while typing (debounced) and when the field loses focus.
-   * Body-carrying methods (POST/PUT/PATCH) get the Content-Type row
-   * even without advanced query options.
+   *
+   * While the user is *typing* (fromBlur = false) only the in-field
+   * $count=true insertion runs — adding header rows there would switch to
+   * the Request-headers tab and hand focus back with a stale caret, which
+   * bounced the cursor back a few characters mid-filter. Header rows are
+   * added once when Graph Explorer opens (scheduleStartupHeaders) and
+   * re-ensured when the field loses focus or the query is run (fromBlur =
+   * true), when stealing focus is harmless. Body-carrying methods
+   * (POST/PUT/PATCH) get the Content-Type row even without advanced query
+   * options.
    */
-  function maybeAssistAdvancedQuery() {
+  function maybeAssistAdvancedQuery(fromBlur) {
     if (!state.settings.advancedQuery) {
       return;
     }
@@ -1331,11 +1356,14 @@
     var methodControl = document.querySelector('[aria-label="HTTP request method option" i]');
     var method = methodControl && methodControl.textContent ? methodControl.textContent.trim().toUpperCase() : 'GET';
     var advanced = GEJQ.applyAdvancedQuery(input.value.trim(), method);
+    if (advanced.addHeader && !/[?&]\$count=/i.test(input.value)) {
+      insertCountIntoEditor(input);
+    }
+    if (!fromBlur) {
+      return; // never touch the headers tab while the user is typing
+    }
     var rows = [];
     if (advanced.addHeader) {
-      if (!/[?&]\$count=/i.test(input.value)) {
-        insertCountIntoEditor(input);
-      }
       rows.push({ name: 'ConsistencyLevel', value: 'eventual' });
     }
     if (advanced.addHeader || method === 'POST' || method === 'PUT' || method === 'PATCH') {
@@ -1382,6 +1410,9 @@
   function ensureHeaderRows(rows, options) {
     var force = options && options.force === true;
     var pending = rows.filter(function (row) {
+      if (headersInFlight[row.name]) {
+        return false; // an add for this header is already running
+      }
       if (force) {
         return true; // restore regardless of this session's earlier assists
       }
@@ -1394,6 +1425,9 @@
     if (pending.length === 0) {
       return;
     }
+    pending.forEach(function (row) {
+      headersInFlight[row.name] = true;
+    });
     var headersTab = findHeadersTab();
     if (!headersTab) {
       return;
@@ -1408,6 +1442,9 @@
     headersTab.click();
 
     function finish() {
+      pending.forEach(function (row) {
+        delete headersInFlight[row.name];
+      });
       if (restoreTab) {
         try {
           restoreTab.click();
@@ -1985,8 +2022,11 @@
       return;
     }
     manualCounter += 1;
+    var id = 'manual-' + Date.now() + '-' + manualCounter;
+    // Select the pasted source so it's shown now (badge reads "pinned").
+    // followLatest stays on so a later real Graph response resumes live.
     addResponse({
-      id: 'manual-' + Date.now() + '-' + manualCounter,
+      id: id,
       method: 'PASTE',
       url: 'pasted JSON #' + manualCounter,
       status: 0,
@@ -1995,7 +2035,8 @@
       json: parsed.value,
       size: text.length
     });
-    state.followLatest = true;
+    state.selectedId = id;
+    refreshHistorySelect();
     hidePasteDialog();
     openPanel();
     runQuery();
@@ -2233,7 +2274,8 @@
       { tag: cm.tags.keyword, color: 'var(--gejq-tok-keyword)' },
       { tag: cm.tags.operator, color: 'var(--gejq-tok-operator)' },
       { tag: cm.tags.variableName, color: 'var(--gejq-tok-variable)' },
-      { tag: cm.tags.propertyName, color: 'var(--gejq-tok-property)' }
+      { tag: cm.tags.propertyName, color: 'var(--gejq-tok-property)' },
+      { tag: cm.tags.bracket, color: 'var(--gejq-tok-bracket)' }
     ]);
     function streamLanguage(languageKey) {
       return cm.StreamLanguage.define({
@@ -2335,13 +2377,12 @@
 
   // ------------------------------------------------------------------ panel
 
-  /** Refill the cheat sheet for the selected query language. */
-  function rebuildHelp() {
+  /** Documentation reference for the selected language, shown under the
+   *  "Suggested for this response" section (replaces the old cheat sheet). */
+  function renderSuggestionHelp() {
     var language = LANGUAGES[state.settings.queryLanguage];
-    ui.helpSummary.textContent = language.label + ' cheat sheet';
-    var body = ui.helpBody;
-    clearChildren(body);
-
+    var box = ui.suggestionsHelp;
+    clearChildren(box);
     var intro = el('p', 'gejq-help-text');
     intro.appendChild(document.createTextNode(language.blurb));
     var link = el('a', null, language.docsHost);
@@ -2350,18 +2391,7 @@
     link.rel = 'noreferrer noopener';
     intro.appendChild(link);
     intro.appendChild(document.createTextNode('.'));
-    body.appendChild(intro);
-
-    language.examples.forEach(function (example) {
-      var row = el('div', 'gejq-example');
-      row.appendChild(
-        button('gejq-chip', example.query, 'Use this query', function () {
-          setQuery(example.query);
-        })
-      );
-      row.appendChild(el('span', 'gejq-example-label', example.label));
-      body.appendChild(row);
-    });
+    box.appendChild(intro);
   }
 
   function buildUi(css) {
@@ -2452,13 +2482,17 @@
     responseText.placeholder = 'Waiting for Graph responses…';
     responseText.title = 'The response being queried (selectable)';
     historyRow.appendChild(responseText);
-    var historySelect = el('select', 'gejq-history-select');
+    var historySelect = el('select', 'gejq-history-select gejq-response-select');
     historySelect.title = 'Captured Graph responses (newest first)';
     historySelect.setAttribute('aria-label', 'Captured Graph responses');
     historySelect.addEventListener('change', function () {
       state.selectedId = historySelect.value;
+      // "Live" means: viewing the newest real response. Selecting it (even
+      // when a pinned-result snapshot sits above it) resumes live;
+      // selecting a pin or an older response pins to it.
       var visible = visibleResponses();
-      state.followLatest = visible.length > 0 && visible[0].id === historySelect.value;
+      var newest = visible.length > 0 ? newestLiveResponse(visible) : null;
+      state.followLatest = !!newest && newest.id === historySelect.value;
       runQuery();
     });
     historyRow.appendChild(historySelect);
@@ -2527,13 +2561,16 @@
     var resultOutput = el('div', 'gejq-result');
     panel.appendChild(resultOutput);
 
-    // Suggestions (collapsible, open by default)
+    // Suggestions (collapsible, open by default). This is also where the
+    // language's documentation reference lives (the separate cheat sheet
+    // was redundant with the data-driven suggestions).
     var suggestionsDetails = el('details', 'gejq-help gejq-suggestions-details');
     suggestionsDetails.open = true;
     suggestionsDetails.appendChild(el('summary', null, 'Suggested for this response'));
+    var suggestionsHelp = el('div', 'gejq-suggestions-help');
+    suggestionsDetails.appendChild(suggestionsHelp);
     var suggestions = el('div', 'gejq-suggestions');
     suggestionsDetails.appendChild(suggestions);
-    suggestionsDetails.style.display = 'none';
     panel.appendChild(suggestionsDetails);
 
     // Query history (persisted, newest first) with a filter bar.
@@ -2626,14 +2663,6 @@
     queryHistoryBody.appendChild(historyActions);
     queryHistoryDetails.appendChild(queryHistoryBody);
     panel.appendChild(queryHistoryDetails);
-
-    // Cheat sheet for the selected language
-    var helpDetails = el('details', 'gejq-help');
-    var helpSummary = el('summary', null, 'Cheat sheet');
-    helpDetails.appendChild(helpSummary);
-    var helpBody = el('div', 'gejq-help-body');
-    helpDetails.appendChild(helpBody);
-    panel.appendChild(helpDetails);
 
     var footer = el('footer', 'gejq-footer');
 
@@ -2749,10 +2778,9 @@
       diffSelect: diffSelect,
       resultOutput: resultOutput,
       suggestions: suggestions,
+      suggestionsHelp: suggestionsHelp,
       suggestionsDetails: suggestionsDetails,
       languageSelect: languageSelect,
-      helpSummary: helpSummary,
-      helpBody: helpBody,
       queryHistoryList: queryHistoryList,
       queryHistorySummary: queryHistorySummary,
       historyFilterRow: historyFilterRow,

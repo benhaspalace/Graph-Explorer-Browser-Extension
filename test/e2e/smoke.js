@@ -327,6 +327,35 @@ function check(name, ok, extra) {
   // non-static value proves the stylesheet reached the shadow root.
   check('CM: stylesheet applied inside the shadow root', cmStyled.announce !== 'static' && cmStyled.announce !== 'missing', JSON.stringify(cmStyled));
   check('CM: highlights tokens', cmStyled.highlightSpans > 0, JSON.stringify(cmStyled));
+  // Brackets are their own colored token (color-coding), and the matched
+  // pair is emphasized with weight/color rather than a background box that
+  // would sit over the caret. Type value[0] so the caret lands right after
+  // the ] — that is when CodeMirror renders .cm-matchingBracket.
+  await query.click();
+  await page.keyboard.press('Control+A');
+  await page.keyboard.press('Delete');
+  await page.keyboard.type('value[0]');
+  await page.waitForTimeout(200);
+  const bracketStyle = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const spans = Array.from(shadow.querySelectorAll('.gejq-query-editor .cm-line span[class]'));
+    const bracketSpan = spans.find((s) => /^[()[\]{}]+$/.test(s.textContent));
+    const match = shadow.querySelector('.gejq-query-editor .cm-matchingBracket');
+    return {
+      bracketColored: !!bracketSpan,
+      matchFound: !!match,
+      matchBg: match ? getComputedStyle(match).backgroundColor : '',
+      matchWeight: match ? getComputedStyle(match).fontWeight : ''
+    };
+  });
+  check('CM: brackets get their own colored token', bracketStyle.bracketColored, JSON.stringify(bracketStyle));
+  check(
+    'CM: matched bracket uses weight, not a caret-covering box',
+    bracketStyle.matchFound &&
+      (bracketStyle.matchBg === 'rgba(0, 0, 0, 0)' || bracketStyle.matchBg === 'transparent') &&
+      Number(bracketStyle.matchWeight) >= 700,
+    JSON.stringify(bracketStyle)
+  );
 
   await query.fill('value[].{name: displayName, email: mail}');
   await page.waitForTimeout(400);
@@ -391,7 +420,7 @@ function check(name, ok, extra) {
   await query.fill('value[].displayName');
   await page.waitForTimeout(400);
 
-  const meta = await page.locator('.gejq-meta').first().innerText();
+  const meta = await page.locator('.gejq-meta-right').innerText();
   check('meta line describes result', meta.includes('array'), meta);
 
   // Advanced-query setting (default on): leaving the URI field with a
@@ -714,7 +743,7 @@ function check(name, ok, extra) {
   await page.waitForTimeout(300);
   const csvView = await page.locator('.gejq-result').innerText();
   check('CSV view renders CSV text', csvView.startsWith('value') && csvView.includes('Adele Vance'), csvView.slice(0, 40));
-  check('meta marks table view', (await page.locator('.gejq-meta').first().innerText()).includes('table view'));
+  check('meta marks table view', (await page.locator('.gejq-meta-right').innerText()).includes('table view'));
   await page.locator('.gejq-seg-btn', { hasText: 'JSON' }).click();
   await page.waitForTimeout(200);
   check('JSON view restored', (await page.locator('.gejq-result').innerText()).trim().startsWith('['));
@@ -891,7 +920,7 @@ function check(name, ok, extra) {
     };
   });
   check('CSV mode renders a table', tableState.exists && tableState.rows === 6, JSON.stringify(tableState.headers));
-  check('length readout shown top-right', tableState.metaRight.includes('length: 6'), tableState.metaRight);
+  check('size/count readout shown top-right', tableState.metaRight.includes('6 items') && tableState.metaRight.includes('table view'), tableState.metaRight);
   const clickHeader = (dirLabel) =>
     page.evaluate(() => {
       const shadow = document.getElementById('gejq-host').shadowRoot;
@@ -999,7 +1028,7 @@ function check(name, ok, extra) {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     return {
       rows: shadow.querySelectorAll('.gejq-result .gejq-diff-row').length,
-      meta: shadow.querySelector('.gejq-meta').textContent,
+      meta: shadow.querySelector('.gejq-meta-right').textContent,
       baselineOptions: shadow.querySelectorAll('.gejq-diff-select option').length
     };
   });

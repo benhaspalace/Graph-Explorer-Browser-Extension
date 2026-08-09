@@ -31,7 +31,8 @@
   --gejq-tok-operator: #616161;
   --gejq-tok-variable: #001080;
   --gejq-tok-property: #a31515;
-  --gejq-tok-bracket-match: rgba(0, 120, 212, 0.15);
+  --gejq-tok-bracket: #0431fa;
+  --gejq-tok-bracket-match: #0431fa;
   --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
 }
 
@@ -59,7 +60,8 @@
     --gejq-tok-operator: #adadad;
     --gejq-tok-variable: #4fc1ff;
     --gejq-tok-property: #9cdcfe;
-    --gejq-tok-bracket-match: rgba(97, 175, 239, 0.3);
+    --gejq-tok-bracket: #ffd700;
+    --gejq-tok-bracket-match: #ffd700;
     --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
   }
 }
@@ -292,6 +294,28 @@
   font-size: 12px;
 }
 
+/* The captured-responses picker shows only a down-arrow when closed (the
+   selected response is already shown as full text to its left); the option
+   labels appear only when the list is opened. Custom chevron via
+   appearance:none, with the closed label hidden by a transparent color. */
+.gejq-response-select {
+  flex: 0 0 22px;
+  width: 22px;
+  color: transparent;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background: var(--gejq-bg)
+    url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M2 4 L5 7 L8 4" fill="none" stroke="%23888888" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    no-repeat center;
+  background-size: 10px 10px;
+  cursor: pointer;
+}
+
+.gejq-response-select option {
+  color: var(--gejq-text); /* keep the opened list readable */
+}
+
 /* ---------------------------------------------------------- response info */
 
 .gejq-live-badge {
@@ -449,13 +473,20 @@
   color: var(--gejq-text-subtle) !important;
 }
 
+/* Emphasize the matched pair with weight + color instead of a background
+   box, which used to sit on top of the caret and hide it. */
 .gejq-query-editor .cm-matchingBracket {
-  background: var(--gejq-tok-bracket-match) !important;
-  outline: 1px solid var(--gejq-accent);
+  background: none !important;
+  color: var(--gejq-tok-bracket-match) !important;
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
 }
 
 .gejq-query-editor .cm-nonmatchingBracket {
+  background: none !important;
   color: var(--gejq-error) !important;
+  font-weight: 700;
 }
 
 .gejq-error {
