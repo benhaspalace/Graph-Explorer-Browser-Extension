@@ -1141,3 +1141,34 @@ test('stringifyLimited bails out at the counting ceiling instead of hanging', ()
   assert.equal(exact.overflow, false);
   assert.equal(exact.length, JSON.stringify({ a: [1, 2, 3] }, null, 2).length);
 });
+
+test('csvPreview builds sorted display cells with a row cap', () => {
+  const rows = [
+    { name: 'Bravo', n: 2 },
+    { name: 'Alpha', n: 3, extra: true },
+    { name: 'Charlie', n: 1 }
+  ];
+  const plain = GEJQ.csvPreview(rows, null, 10);
+  assert.equal(plain.eligible, true);
+  assert.equal(plain.shape, 'objects');
+  assert.deepEqual(plain.columns, ['name', 'n', 'extra']);
+  assert.equal(plain.total, 3);
+  assert.deepEqual(plain.rows[0], ['Bravo', '2', '']);
+
+  const sorted = GEJQ.csvPreview(rows, { column: 'n', dir: 1 }, 2);
+  assert.deepEqual(sorted.rows.map((r) => r[0]), ['Charlie', 'Bravo']);
+  assert.equal(sorted.total, 3); // cap applies to cells, not the count
+
+  const scalars = GEJQ.csvPreview(['b', 'a'], { column: 'value', dir: 1 }, 10);
+  assert.equal(scalars.shape, 'scalars');
+  assert.deepEqual(scalars.columns, ['value']);
+  assert.deepEqual(scalars.rows, [['a'], ['b']]);
+
+  assert.deepEqual(GEJQ.csvPreview({ not: 'an array' }, null, 10), { eligible: false });
+});
+
+test('csvCellText encodes objects and caps long cells', () => {
+  assert.equal(GEJQ.csvCellText(null), '');
+  assert.equal(GEJQ.csvCellText({ a: 1 }), '{"a":1}');
+  assert.equal(GEJQ.csvCellText('x'.repeat(300)).length, 201);
+});

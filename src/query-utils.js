@@ -3041,6 +3041,51 @@
     return csvShape(value) !== null;
   }
 
+  /** Display text for one table cell (objects JSON-encoded, capped). */
+  function csvCellText(cell) {
+    if (cell === null || cell === undefined) {
+      return '';
+    }
+    var text = typeof cell === 'object' ? JSON.stringify(cell) : String(cell);
+    return text.length > 200 ? text.slice(0, 200) + '…' : text;
+  }
+
+  /**
+   * Table-view package for a query result: sorted display cells for the
+   * first `limit` rows plus the column set and total row count. Shared
+   * by the panel (local rendering) and the off-thread evaluator (which
+   * sends only this package back for large results instead of the whole
+   * result). `sort` is { column, dir } with column null for unsorted;
+   * scalar rows sort by the row itself whatever the column says.
+   * Returns { eligible: false } when the value has no table shape.
+   */
+  function csvPreview(value, sort, limit) {
+    var shape = csvShape(value);
+    if (shape === null) {
+      return { eligible: false };
+    }
+    var rows = value;
+    if (sort && sort.column !== null && sort.column !== undefined) {
+      rows = sortRows(value, shape === 'objects' ? sort.column : null, sort.dir);
+    }
+    var columns = shape === 'objects' ? csvColumns(rows) : ['value'];
+    var max = typeof limit === 'number' && limit > 0 ? limit : rows.length;
+    var cells = [];
+    for (var i = 0; i < rows.length && i < max; i++) {
+      var row = rows[i];
+      if (shape === 'objects') {
+        cells.push(
+          columns.map(function (column) {
+            return csvCellText(row[column]);
+          })
+        );
+      } else {
+        cells.push([csvCellText(row)]);
+      }
+    }
+    return { eligible: true, shape: shape, columns: columns, rows: cells, total: rows.length };
+  }
+
   /** Union of keys across an array of objects (column order = first seen). */
   function csvColumns(rows) {
     var columns = [];
@@ -3309,6 +3354,8 @@
     sortRows: sortRows,
     csvColumns: csvColumns,
     csvShape: csvShape,
+    csvCellText: csvCellText,
+    csvPreview: csvPreview,
     pathQuery: pathQuery,
     diffJson: diffJson,
     upsertQueryHistory: upsertQueryHistory,

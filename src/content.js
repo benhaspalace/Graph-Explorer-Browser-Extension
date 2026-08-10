@@ -94,7 +94,6 @@
     format: 'json', // result view + export format: 'json' | 'csv' | 'tree'
     copyFormat: 'csv', // delimiter for Copy/Download in CSV mode: 'csv' | 'tsv'
     tableSort: { column: null, dir: 1 }, // table-view sorting (csv mode)
-    lastValue: undefined, // last successful query result (sort re-render)
     lastRenderKey: '', // response id + query — resets table sorting
     diff: { active: false, baseId: null }, // compare-mode state
     diffText: '', // exportable text of the last rendered diff
@@ -119,6 +118,7 @@
   var fetchProgress = null; // latest auto-fetch progress payload (null = idle)
   var pendingRun = false; // a refresh was requested while auto-fetch was running
   var queryEditingLocked = false; // editor grayed out while auto-fetch runs
+  var recordNext = false; // record the query into history once this run lands
   var suggestionsCache = { key: '', json: undefined }; // skips redundant re-renders
   var limitedCache = { value: null, limited: null }; // serialized preview per result
 
@@ -232,41 +232,46 @@
     return GEJQ.sortRows(value, shape === 'objects' ? state.tableSort.column : null, state.tableSort.dir);
   }
 
-  function cellText(cell) {
-    if (cell === null || cell === undefined) {
-      return '';
+  /** Re-render the table after a sort click (off-thread for big data). */
+  function resortTable() {
+    var outcome = state.lastOutcome;
+    if (!outcome) {
+      return;
     }
-    var text = typeof cell === 'object' ? JSON.stringify(cell) : String(cell);
-    return text.length > 200 ? text.slice(0, 200) + '…' : text;
+    if (outcome.large) {
+      // The full rows live in the evaluator — request a re-sorted preview.
+      state.lastOutcomeKey = '';
+      runQuery();
+    } else if (outcome.value !== undefined) {
+      applyOutcome(outcome, state.lastOutcomeResponse || selectedResponse());
+    }
   }
 
-  /** Sortable table for CSV mode; header clicks toggle the sort. */
-  function renderTable(output, value) {
-    var shape = GEJQ.csvShape(value);
-    var columns = shape === 'objects' ? GEJQ.csvColumns(value) : ['value'];
-    var rows = sortedTableRows(value);
+  /**
+   * Sortable table for CSV mode, rendered from a csvPreview package —
+   * built locally for small results, sent over by the evaluator for
+   * large ones. Header clicks toggle the sort either way.
+   */
+  function renderTable(output, csv) {
     var scroller = el('div', 'gejq-table-scroll');
     var table = el('table', 'gejq-table');
     var head = el('thead');
     var headRow = el('tr');
-    columns.forEach(function (column) {
-      var sortColumn = shape === 'objects' ? column : null;
-      var active = state.tableSort.column === (sortColumn === null ? 'value' : sortColumn);
+    csv.columns.forEach(function (column) {
+      var sortKey = csv.shape === 'objects' ? column : 'value';
+      var active = state.tableSort.column === sortKey;
       var th = el('th');
       var sortButton = button(
         'gejq-th-button' + (active ? ' gejq-th-active' : ''),
         column + (active ? (state.tableSort.dir === 1 ? ' ▲' : ' ▼') : ''),
         'Sort by ' + column,
         function () {
-          var key = sortColumn === null ? 'value' : sortColumn;
-          if (state.tableSort.column === key) {
+          if (state.tableSort.column === sortKey) {
             state.tableSort.dir = -state.tableSort.dir;
           } else {
-            state.tableSort = { column: key, dir: 1 };
+            state.tableSort = { column: sortKey, dir: 1 };
           }
-          if (state.lastValue !== undefined) {
-            renderResult(state.lastValue);
-          }
+          resortTable();
         }
       );
       th.appendChild(sortButton);
@@ -275,22 +280,18 @@
     head.appendChild(headRow);
     table.appendChild(head);
     var body = el('tbody');
-    rows.slice(0, TABLE_ROW_LIMIT).forEach(function (row) {
+    csv.rows.forEach(function (cells) {
       var tr = el('tr');
-      if (shape === 'objects') {
-        columns.forEach(function (column) {
-          tr.appendChild(el('td', null, cellText(row[column])));
-        });
-      } else {
-        tr.appendChild(el('td', null, cellText(row)));
-      }
+      cells.forEach(function (cell) {
+        tr.appendChild(el('td', null, cell));
+      });
       body.appendChild(tr);
     });
     table.appendChild(body);
     scroller.appendChild(table);
-    if (rows.length > TABLE_ROW_LIMIT) {
+    if (csv.total > csv.rows.length) {
       output.appendChild(
-        el('div', 'gejq-notice', 'Showing the first ' + TABLE_ROW_LIMIT + ' of ' + rows.length + ' rows — Copy/Download export all of them (sorted).')
+        el('div', 'gejq-notice', 'Showing the first ' + csv.rows.length + ' of ' + csv.total + ' rows — Copy/Download export all of them (sorted).')
       );
     }
     output.appendChild(scroller);
@@ -402,17 +403,41 @@
   }
 
   /**
-   * Render the query result: sortable table in CSV mode (when the result
-   * is CSV-able), interactive tree in Tree mode, otherwise pretty JSON.
-   * Returns { mode, size } — size is the exact serialized length. The
-   * rendered TEXT is capped at RENDER_LIMIT characters
-   * (GEJQ.stringifyLimited), so huge auto-fetched datasets never build a
-   * full multi-megabyte string on every keystroke — that froze the tab.
-   * Copy/Download still serialize the full result on demand.
+   * Render an evaluation outcome: sortable table in CSV mode (when the
+   * result is CSV-able), interactive tree in Tree mode, otherwise pretty
+   * JSON. Returns { mode, size, overflow } — size is the exact
+   * serialized length. Small results carry their value (`outcome.value`)
+   * and render as before; large results evaluated off-thread carry only
+   * render-ready artifacts (`outcome.large`: capped preview text, exact
+   * size, table cells), so no multi-megabyte value ever crosses back
+   * onto this thread. Copy/Download fetch the full text on demand.
    */
-  function renderResult(value) {
+  function renderResult(outcome) {
     var output = ui.resultOutput;
     clearChildren(output);
+    if (outcome.large) {
+      var large = outcome.large;
+      if (state.format === 'csv' && large.csv && large.csv.eligible) {
+        renderTable(output, large.csv);
+        return { mode: 'csv', size: large.size, overflow: large.overflow };
+      }
+      if (state.format === 'tree') {
+        output.appendChild(
+          el('div', 'gejq-notice', 'This result is too large for the tree view — use the JSON or CSV view, or narrow the query.')
+        );
+        return { mode: 'tree', size: large.size, overflow: large.overflow };
+      }
+      output.appendChild(
+        el(
+          'div',
+          'gejq-notice',
+          'Result is large (' + (large.overflow ? '≥ ' : '') + GEJQ.formatBytes(large.size) + '). Showing the first ' + GEJQ.formatBytes(large.preview.length) + ' — use Copy or Download for the full result.'
+        )
+      );
+      output.appendChild(el('pre', 'gejq-json', large.preview + '\n…'));
+      return { mode: 'json', size: large.size, overflow: large.overflow };
+    }
+    var value = outcome.value;
     if (value === undefined) {
       output.appendChild(el('div', 'gejq-empty', 'The query returned no result (undefined).'));
       return { mode: 'json', size: 0 };
@@ -421,7 +446,7 @@
     var text = typeof limited.text === 'string' ? limited.text : String(value);
     var size = limited.length;
     if (state.format === 'csv' && GEJQ.csvEligible(value)) {
-      renderTable(output, value);
+      renderTable(output, GEJQ.csvPreview(value, state.tableSort.column === null ? null : state.tableSort, TABLE_ROW_LIMIT));
       return { mode: 'csv', size: size, overflow: limited.overflow };
     }
     if (state.format === 'tree') {
@@ -538,6 +563,11 @@
     if (state.lastOutcome && state.lastOutcomeKey === outcomeKey() && state.lastOutcomeResponse === selectedResponse()) {
       return state.lastOutcome;
     }
+    if (remoteEligible(selectedResponse())) {
+      // Big dataset with no fresh evaluation — never evaluate it on this
+      // thread; the caller treats `pending` as "no result yet".
+      return { value: undefined, error: null, pending: true };
+    }
     return currentResult();
   }
 
@@ -550,6 +580,212 @@
     limitedCache = { value: value, limited: limited };
     return limited;
   }
+
+  // ------------------------------------------------- off-thread evaluation
+
+  // Datasets above this raw size are queried in the evaluator iframe
+  // (src/evaluator.html) — an extension-origin page Chrome hosts in the
+  // extension's own process, so its evaluations never block this tab's
+  // main thread. Smaller datasets keep the zero-latency local path.
+  var EVAL_LOCAL_LIMIT = 512 * 1024;
+
+  var evaluator = {
+    frame: null,
+    origin: '',
+    ready: false,
+    failed: false, // never loaded — everything stays on the local path
+    counter: 0,
+    synced: {}, // datasetId -> the exact entry object whose json was sent
+    pendingMain: null, // in-flight query evaluation (latest wins)
+    pendingExport: null, // in-flight Copy/Download text request
+    pendingDiff: null // in-flight compare-mode request
+  };
+
+  function initEvaluator() {
+    try {
+      evaluator.origin = new URL(chrome.runtime.getURL('')).origin;
+      var frame = document.createElement('iframe');
+      frame.id = 'gejq-evaluator';
+      frame.src = chrome.runtime.getURL('src/evaluator.html');
+      frame.style.display = 'none';
+      frame.setAttribute('aria-hidden', 'true');
+      (document.body || document.documentElement).appendChild(frame);
+      evaluator.frame = frame;
+      setTimeout(function () {
+        if (!evaluator.ready) {
+          evaluator.failed = true; // blocked from loading — local evaluation only
+        }
+      }, 10000);
+    } catch (e) {
+      evaluator.failed = true;
+    }
+  }
+
+  /** Re-attach the evaluator frame if the host app wiped it (it reloads). */
+  function ensureEvaluatorAttached() {
+    if (evaluator.frame && !evaluator.frame.isConnected) {
+      evaluator.ready = false;
+      evaluator.synced = {};
+      evaluator.pendingMain = null;
+      evaluator.pendingExport = null;
+      evaluator.pendingDiff = null;
+      (document.body || document.documentElement).appendChild(evaluator.frame);
+    }
+  }
+
+  function evaluatorAvailable() {
+    return evaluator.ready && !evaluator.failed && !!evaluator.frame && evaluator.frame.isConnected;
+  }
+
+  /** Should this response be queried off-thread? */
+  function remoteEligible(response) {
+    return (
+      evaluatorAvailable() &&
+      !!response &&
+      typeof response.size === 'number' &&
+      response.size > EVAL_LOCAL_LIMIT &&
+      response.json !== undefined
+    );
+  }
+
+  function evaluatorSend(message) {
+    try {
+      evaluator.frame.contentWindow.postMessage(message, evaluator.origin);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** One dataset transfer per entry generation (upserts resend lazily). */
+  function ensureDatasetSynced(response) {
+    if (evaluator.synced[response.id] === response) {
+      return;
+    }
+    evaluatorSend({ type: 'gejq-dataset', id: response.id, json: response.json });
+    evaluator.synced[response.id] = response;
+  }
+
+  function requestEvaluation(response, key, options) {
+    ensureDatasetSynced(response);
+    evaluator.counter += 1;
+    evaluator.pendingMain = {
+      requestId: evaluator.counter,
+      key: key,
+      response: response,
+      record: !!(options && options.record),
+      retried: !!(options && options.retried)
+    };
+    ui.metaRight.textContent = 'evaluating…';
+    var sent = evaluatorSend({
+      type: 'gejq-evaluate',
+      requestId: evaluator.counter,
+      datasetId: response.id,
+      language: state.settings.queryLanguage,
+      query: state.query.trim(),
+      valueLimit: RENDER_LIMIT,
+      sizeCeiling: RENDER_SIZE_CEILING,
+      sort: state.tableSort.column === null ? null : state.tableSort
+    });
+    if (!sent) {
+      // Frame gone mid-send — evaluate locally rather than showing nothing.
+      var pending = evaluator.pendingMain;
+      evaluator.pendingMain = null;
+      finishOutcome(currentResult(), response, key, pending.record);
+    }
+  }
+
+  function handleEvaluationReply(data) {
+    var pending = evaluator.pendingMain;
+    if (!pending || data.requestId !== pending.requestId) {
+      return; // superseded by a newer request
+    }
+    evaluator.pendingMain = null;
+    if (data.needDataset) {
+      delete evaluator.synced[pending.response.id];
+      if (!pending.retried) {
+        requestEvaluation(pending.response, pending.key, { retried: true, record: pending.record });
+      }
+      return;
+    }
+    if (outcomeKey() !== pending.key || selectedResponse() !== pending.response) {
+      return; // the query or selection moved on — a newer run is coming
+    }
+    var outcome;
+    if (data.ok !== true) {
+      outcome = {
+        value: undefined,
+        error: LANGUAGES[state.settings.queryLanguage].label + ': ' + (data.error || 'evaluation failed')
+      };
+    } else if (data.valueUndefined) {
+      outcome = { value: undefined, error: null };
+    } else if (data.large) {
+      outcome = { value: undefined, large: data.large, error: null };
+    } else {
+      outcome = { value: data.value, error: null };
+    }
+    finishOutcome(outcome, pending.response, pending.key, pending.record);
+  }
+
+  function handleExportReply(data) {
+    var pending = evaluator.pendingExport;
+    if (!pending || data.requestId !== pending.requestId) {
+      return;
+    }
+    evaluator.pendingExport = null;
+    pending.callback(data);
+  }
+
+  function handleDiffReply(data) {
+    var pending = evaluator.pendingDiff;
+    if (!pending || data.requestId !== pending.requestId) {
+      return;
+    }
+    evaluator.pendingDiff = null;
+    if (!state.diff.active || state.diff.baseId !== pending.baseId || outcomeKey() !== pending.key) {
+      return; // compare mode moved on
+    }
+    if (data.ok !== true) {
+      clearChildren(ui.resultOutput);
+      var side = data.side === 'base' ? 'baseline' : 'selected';
+      ui.resultOutput.appendChild(
+        el('div', 'gejq-notice', 'The query fails on the ' + side + ' response: ' + (data.error || 'evaluation failed'))
+      );
+      state.diffText = '';
+      return;
+    }
+    renderDiffRows(data.rows || []);
+  }
+
+  // Replies from the evaluator iframe. event.source is the trust anchor:
+  // page scripts can post to this window, but they cannot forge the
+  // frame's contentWindow as their source.
+  window.addEventListener('message', function (event) {
+    if (!evaluator.frame || event.source !== evaluator.frame.contentWindow) {
+      return;
+    }
+    var data = event.data;
+    if (!data || data.source !== 'gejq-evaluator') {
+      return;
+    }
+    if (data.type === 'gejq-ready') {
+      // May arrive before buildUi — must not be dropped.
+      evaluator.ready = true;
+      evaluator.failed = false;
+      evaluator.synced = {}; // a (re)load emptied the evaluator's cache
+      return;
+    }
+    if (!ui) {
+      return;
+    }
+    if (data.type === 'gejq-result') {
+      handleEvaluationReply(data);
+    } else if (data.type === 'gejq-export-result') {
+      handleExportReply(data);
+    } else if (data.type === 'gejq-diff-result') {
+      handleDiffReply(data);
+    }
+  });
 
   /**
    * Fill the response row: a live/pinned badge plus the full request
@@ -628,6 +864,7 @@
     syncTheme();
 
     if (!response) {
+      recordNext = false;
       state.lastOutcome = null;
       ui.error.textContent = '';
       setWarning('');
@@ -649,6 +886,7 @@
     }
 
     if (response.tooLarge) {
+      recordNext = false;
       state.lastOutcome = null;
       ui.error.textContent = '';
       setWarning('');
@@ -675,10 +913,57 @@
     // a language switch left an incompatible query in the box).
     renderSuggestions(response.json);
 
-    var outcome = currentOutcome(); // cached when nothing changed since the last run
-    state.lastOutcome = outcome; // reused by recordQuery/exportPayload — no re-evaluation
-    state.lastOutcomeKey = outcomeKey();
+    if (
+      !evaluator.ready &&
+      !evaluator.failed &&
+      evaluator.frame &&
+      typeof response.size === 'number' &&
+      response.size > EVAL_LOCAL_LIMIT
+    ) {
+      // Big dataset but the evaluator is still booting — wait for it
+      // rather than falling back to a blocking local evaluation.
+      // (recordNext stays set for the retry.)
+      ui.metaRight.textContent = 'evaluating…';
+      setTimeout(runQuery, 300);
+      return;
+    }
+
+    var key = outcomeKey();
+    var renderKey = response.id + '|' + state.query;
+    if (renderKey !== state.lastRenderKey) {
+      state.lastRenderKey = renderKey;
+      state.tableSort = { column: null, dir: 1 }; // new data → reset sorting
+    }
+    var record = recordNext;
+    recordNext = false;
+
+    if (state.lastOutcome && state.lastOutcomeKey === key && state.lastOutcomeResponse === response) {
+      evaluator.pendingMain = null; // this state is current — drop stale replies
+      finishOutcome(state.lastOutcome, response, key, record);
+      return;
+    }
+    if (remoteEligible(response)) {
+      // Big dataset: evaluate in the extension-process iframe. The reply
+      // lands in handleEvaluationReply; the previous result stays visible.
+      requestEvaluation(response, key, { record: record });
+      return;
+    }
+    evaluator.pendingMain = null;
+    finishOutcome(currentResult(), response, key, record);
+  }
+
+  /** Store + render an evaluation outcome (local or from the evaluator). */
+  function finishOutcome(outcome, response, key, record) {
+    state.lastOutcome = outcome; // reused by exports/pin — no re-evaluation
+    state.lastOutcomeKey = key;
     state.lastOutcomeResponse = response;
+    applyOutcome(outcome, response);
+    if (record) {
+      recordQuery(outcome);
+    }
+  }
+
+  function applyOutcome(outcome, response) {
     if (outcome.error) {
       ui.error.textContent = outcome.error;
       updateExportButtons(outcome);
@@ -686,31 +971,47 @@
       return; // keep previous result visible while the user types
     }
     ui.error.textContent = '';
-    state.lastValue = outcome.value;
-    var renderKey = response.id + '|' + state.query;
-    if (renderKey !== state.lastRenderKey) {
-      state.lastRenderKey = renderKey;
-      state.tableSort = { column: null, dir: 1 }; // new data → reset sorting
-    }
     if (state.diff.active) {
-      renderDiffView(response, outcome.value);
+      renderDiffView(response, outcome);
       updateExportButtons(outcome);
       renderGraphEquivalent();
       return;
     }
-    var rendered = renderResult(outcome.value);
+    var rendered = renderResult(outcome);
     // Result readout on the right: type · count · size (· view). How the
     // dataset was fetched sits on the left (updateAutoFetchedMeta).
     ui.metaRight.textContent =
-      GEJQ.describeResult(outcome.value) +
+      (outcome.large ? outcome.large.describe : GEJQ.describeResult(outcome.value)) +
       (rendered.size > 0 ? ' · ' + (rendered.overflow ? '≥ ' : '') + GEJQ.formatBytes(rendered.size) : '') +
       (rendered.mode === 'csv' ? ' · table view' : rendered.mode === 'tree' ? ' · tree view' : '');
     updateExportButtons(outcome);
     renderGraphEquivalent();
   }
 
+  /** Render pre-built diff rows ({path, kind, detail}) + export text. */
+  function renderDiffRows(rows) {
+    var output = ui.resultOutput;
+    clearChildren(output);
+    ui.meta.textContent = '';
+    ui.metaRight.textContent = rows.length + ' difference(s) vs baseline';
+    var lines = [];
+    if (rows.length === 0) {
+      output.appendChild(el('div', 'gejq-empty', 'No differences between the two results.'));
+    }
+    rows.forEach(function (diff) {
+      var row = el('div', 'gejq-diff-row gejq-diff-' + diff.kind);
+      var marker = diff.kind === 'added' ? '+' : diff.kind === 'removed' ? '−' : '~';
+      row.appendChild(el('span', 'gejq-diff-marker', marker));
+      row.appendChild(el('span', 'gejq-diff-path', diff.path));
+      row.appendChild(el('span', 'gejq-diff-detail', diff.detail));
+      output.appendChild(row);
+      lines.push(marker + ' ' + diff.path + ': ' + diff.detail);
+    });
+    state.diffText = lines.join('\n');
+  }
+
   /** Compare mode: the current query applied to baseline vs selected. */
-  function renderDiffView(response, currentValue) {
+  function renderDiffView(response, outcome) {
     var output = ui.resultOutput;
     clearChildren(output);
     var baseline = null;
@@ -727,6 +1028,29 @@
       output.appendChild(el('div', 'gejq-empty', 'Pick a different response in the "vs" dropdown to compare against.'));
       return;
     }
+    if (outcome.large || remoteEligible(response) || remoteEligible(baseline)) {
+      if (evaluatorAvailable()) {
+        // Big data on either side — diff in the evaluator's process.
+        ensureDatasetSynced(response);
+        ensureDatasetSynced(baseline);
+        evaluator.counter += 1;
+        evaluator.pendingDiff = { requestId: evaluator.counter, baseId: baseline.id, key: outcomeKey() };
+        ui.metaRight.textContent = 'comparing…';
+        output.appendChild(el('div', 'gejq-empty', 'Comparing…'));
+        evaluatorSend({
+          type: 'gejq-diff',
+          requestId: evaluator.counter,
+          baseId: baseline.id,
+          currentId: response.id,
+          language: state.settings.queryLanguage,
+          query: state.query.trim()
+        });
+      } else {
+        output.appendChild(el('div', 'gejq-notice', 'These responses are too large to compare here.'));
+        state.diffText = '';
+      }
+      return;
+    }
     var baseValue;
     try {
       baseValue = state.query.trim() === '' ? baseline.json : executeQuery(baseline.json, state.query.trim());
@@ -735,27 +1059,14 @@
       state.diffText = '';
       return;
     }
-    var diffs = GEJQ.diffJson(baseValue, currentValue, 500);
-    ui.meta.textContent = '';
-    ui.metaRight.textContent = diffs.length + ' difference(s) vs baseline';
-    var lines = [];
-    if (diffs.length === 0) {
-      output.appendChild(el('div', 'gejq-empty', 'No differences between the two results.'));
-    }
-    diffs.forEach(function (diff) {
-      var row = el('div', 'gejq-diff-row gejq-diff-' + diff.kind);
-      var marker = diff.kind === 'added' ? '+' : diff.kind === 'removed' ? '−' : '~';
-      row.appendChild(el('span', 'gejq-diff-marker', marker));
-      row.appendChild(el('span', 'gejq-diff-path', diff.path));
+    var rows = GEJQ.diffJson(baseValue, outcome.value, 500).map(function (diff) {
       var beforeText = diff.before === undefined ? '' : JSON.stringify(diff.before);
       var afterText = diff.after === undefined ? '' : JSON.stringify(diff.after);
       var detail =
         diff.kind === 'added' ? afterText : diff.kind === 'removed' ? beforeText : beforeText + ' → ' + afterText;
-      row.appendChild(el('span', 'gejq-diff-detail', detail.length > 160 ? detail.slice(0, 160) + '…' : detail));
-      output.appendChild(row);
-      lines.push(marker + ' ' + diff.path + ': ' + detail);
+      return { path: diff.path, kind: diff.kind, detail: detail.length > 160 ? detail.slice(0, 160) + '…' : detail };
     });
-    state.diffText = lines.join('\n');
+    renderDiffRows(rows);
   }
 
   /**
@@ -790,44 +1101,90 @@
 
   // ------------------------------------------------------------- exporting
 
-  /** The current result in the selected export format, or null. */
-  function exportPayload() {
+  /**
+   * Hand the current result in the selected export format to `callback`
+   * (as { text, filename, mime, bom? }, or null when there is nothing to
+   * export). Asynchronous because large results live in the evaluator —
+   * their full text is serialized there and fetched on demand, never
+   * rebuilt on this thread.
+   */
+  function withExportPayload(callback) {
     if (fetchRunning()) {
-      return null; // no evaluation while auto-fetch is running
+      callback(null); // no evaluation while auto-fetch is running
+      return;
     }
     if (state.diff.active) {
-      if (state.diffText === '') {
-        return null;
-      }
-      return { text: state.diffText, filename: GEJQ.exportFilename('', 'txt'), mime: 'text/plain' };
+      callback(state.diffText === '' ? null : { text: state.diffText, filename: GEJQ.exportFilename('', 'txt'), mime: 'text/plain' });
+      return;
     }
     var outcome = currentOutcome();
-    if (outcome.error || outcome.value === undefined) {
-      return null;
+    if (outcome.error || outcome.pending) {
+      callback(null);
+      return;
     }
     var response = selectedResponse();
     var sourceUrl = response ? response.url : '';
+    var tsv = state.copyFormat === 'tsv';
+    if (outcome.large) {
+      var format = state.format === 'csv' ? (tsv ? 'tsv' : 'csv') : 'json';
+      ensureDatasetSynced(response);
+      evaluator.counter += 1;
+      evaluator.pendingExport = {
+        requestId: evaluator.counter,
+        callback: function (reply) {
+          if (!reply || reply.ok !== true || typeof reply.text !== 'string') {
+            callback(null);
+            return;
+          }
+          callback(
+            format === 'json'
+              ? { text: reply.text, filename: GEJQ.exportFilename(sourceUrl, 'json'), mime: 'application/json' }
+              : {
+                  text: reply.text,
+                  filename: GEJQ.exportFilename(sourceUrl, format),
+                  mime: format === 'tsv' ? 'text/tab-separated-values' : 'text/csv',
+                  bom: true
+                }
+          );
+        }
+      };
+      evaluatorSend({
+        type: 'gejq-export',
+        requestId: evaluator.counter,
+        datasetId: response.id,
+        language: state.settings.queryLanguage,
+        query: state.query.trim(),
+        format: format,
+        sort: state.tableSort.column === null ? null : state.tableSort
+      });
+      return;
+    }
+    if (outcome.value === undefined) {
+      callback(null);
+      return;
+    }
     if (state.format === 'csv') {
       // Export what the table shows — the applied sorting included — in the
       // delimiter the copy-format dropdown selects (CSV or TSV).
       var rows = sortedTableRows(outcome.value);
-      var tsv = state.copyFormat === 'tsv';
       var text = tsv ? GEJQ.toTsv(rows) : GEJQ.toCsv(rows);
-      if (text === null) {
-        return null;
-      }
-      return {
-        text: text,
-        filename: GEJQ.exportFilename(sourceUrl, tsv ? 'tsv' : 'csv'),
-        mime: tsv ? 'text/tab-separated-values' : 'text/csv',
-        bom: true // UTF-8 BOM so Excel reads accents in both CSV and TSV
-      };
+      callback(
+        text === null
+          ? null
+          : {
+              text: text,
+              filename: GEJQ.exportFilename(sourceUrl, tsv ? 'tsv' : 'csv'),
+              mime: tsv ? 'text/tab-separated-values' : 'text/csv',
+              bom: true // UTF-8 BOM so Excel reads accents in both CSV and TSV
+            }
+      );
+      return;
     }
-    return {
+    callback({
       text: JSON.stringify(outcome.value, null, 2),
       filename: GEJQ.exportFilename(sourceUrl, 'json'),
       mime: 'application/json'
-    };
+    });
   }
 
   /**
@@ -839,15 +1196,20 @@
     if (outcome === undefined) {
       outcome = currentOutcome();
     }
-    var hasResult = !outcome.error && outcome.value !== undefined;
-    var csvOk = hasResult && GEJQ.csvEligible(outcome.value);
+    var hasResult = !outcome.error && !outcome.pending && (outcome.value !== undefined || !!outcome.large);
+    var csvOk =
+      hasResult &&
+      (outcome.large ? !!(outcome.large.csv && outcome.large.csv.eligible) : GEJQ.csvEligible(outcome.value));
     var diffing = state.diff.active;
     ui.csvToggle.disabled = diffing || !csvOk;
     ui.csvToggle.title = hasResult && !csvOk
       ? 'This result cannot be shown as a table / CSV (needs an array of objects or scalar values)'
       : 'Table view / export as CSV';
     ui.jsonToggle.disabled = diffing;
-    ui.treeToggle.disabled = diffing || !hasResult;
+    ui.treeToggle.disabled = diffing || !hasResult || !!outcome.large;
+    ui.treeToggle.title = hasResult && outcome.large
+      ? 'This result is too large for the tree view'
+      : 'Interactive tree — click a property to use its path as the query';
     ui.jsonToggle.classList.toggle('gejq-seg-active', !diffing && state.format === 'json');
     ui.csvToggle.classList.toggle('gejq-seg-active', !diffing && state.format === 'csv');
     ui.treeToggle.classList.toggle('gejq-seg-active', !diffing && state.format === 'tree');
@@ -1118,7 +1480,11 @@
       return; // no evaluation while auto-fetch is running
     }
     var outcome = currentOutcome();
-    if (outcome.error || outcome.value === undefined) {
+    if (outcome.large) {
+      setWarning('This result is too large to pin — narrow the query first.');
+      return;
+    }
+    if (outcome.error || outcome.pending || outcome.value === undefined) {
       return;
     }
     manualCounter += 1;
@@ -1229,8 +1595,8 @@
     state.query = query;
     ui.queryEditor.setValue(query);
     storageSet(STORAGE_KEY_QUERY, query);
+    recordNext = true; // record once the (possibly async) evaluation lands
     runQuery();
-    recordQuery();
     ui.queryEditor.focus();
   }
 
@@ -1971,18 +2337,14 @@
    * input) — not on every keystroke. Each entry remembers when it was
    * last used and which Graph request it ran against.
    */
-  function recordQuery() {
-    if (fetchRunning()) {
-      return; // no evaluation while auto-fetch is running
-    }
+  function recordQuery(outcome) {
     var query = state.query.trim();
     if (query === '') {
       return;
     }
-    // Every caller runs runQuery() first — reuse its evaluation instead of
-    // re-running the query (which doubled the cost on large datasets).
-    var outcome = currentOutcome();
-    if (outcome.error || outcome.empty) {
+    // Callers pass the evaluation runQuery just finished (possibly from
+    // the off-thread evaluator) — the query is never re-run here.
+    if (!outcome || outcome.error || outcome.empty || outcome.pending) {
       return;
     }
     var response = selectedResponse();
@@ -2449,6 +2811,7 @@
     }
   }
 
+
   function scheduleEnsurePlacement() {
     if (embedTimer) {
       return;
@@ -2538,8 +2901,8 @@
         }
         if (event.key === 'Enter' && !event.shiftKey) {
           event.preventDefault();
+          recordNext = true; // record once the (possibly async) run lands
           runQuery();
-          recordQuery();
           return true;
         }
         return false;
@@ -3079,10 +3442,11 @@
     footer.appendChild(formatSwitch);
 
     var copyButton = button('gejq-action', 'Copy', 'Copy the query result in the selected format', function () {
-      var payload = exportPayload();
-      if (payload !== null) {
-        copyText(payload.text, copyButton, 'Copied ✓');
-      }
+      withExportPayload(function (payload) {
+        if (payload !== null) {
+          copyText(payload.text, copyButton, 'Copied ✓');
+        }
+      });
     });
     // In CSV (table) mode, this picks the delimiter for Copy and Download.
     // Hidden in JSON/Tree modes (see updateExportButtons).
@@ -3102,12 +3466,13 @@
       storageSet(STORAGE_KEY_COPY_FORMAT, state.copyFormat);
     });
     var downloadButton = button('gejq-action', 'Download', 'Download the query result in the selected format', function () {
-      var payload = exportPayload();
-      if (payload !== null) {
-        // UTF-8 BOM so Excel opens downloaded CSV/TSV with correct accents.
-        var text = payload.bom ? '\uFEFF' + payload.text : payload.text;
-        downloadText(text, payload.filename, payload.mime);
-      }
+      withExportPayload(function (payload) {
+        if (payload !== null) {
+          // UTF-8 BOM so Excel opens downloaded CSV/TSV with correct accents.
+          var text = payload.bom ? '\uFEFF' + payload.text : payload.text;
+          downloadText(text, payload.filename, payload.mime);
+        }
+      });
     });
     footer.appendChild(copyButton);
     footer.appendChild(copyFormatSelect);
@@ -3211,6 +3576,7 @@
       if ((anchor && !attached) || (!anchor && state.embedded) || !ui.host.isConnected) {
         scheduleEnsurePlacement();
       }
+      ensureEvaluatorAttached(); // the hidden evaluator frame must survive too
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
   }
@@ -3328,6 +3694,7 @@
   }
 
   function init() {
+    initEvaluator(); // boots in parallel with the panel; local eval until ready
     fetch(chrome.runtime.getURL('src/content.css'))
       .then(function (response) {
         return response.text();

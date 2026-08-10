@@ -264,6 +264,16 @@ engine covers core jq, without the regex builtins).
   Graph Explorer's results area (`#response-area`), splitting it 50/50. A
   `MutationObserver` re-attaches the panel whenever Graph Explorer's React app
   re-renders that area.
+- `src/evaluator.html` + `src/evaluator.js` form a hidden extension-origin
+  iframe that Chrome hosts in the extension's own process. Datasets over
+  512 KB are cached there and every query evaluation, exact-size walk,
+  table sort, export serialization, and diff over them runs on that
+  process's thread — a multi-second jq run over a 100 MB dataset no longer
+  blocks typing, the page, or the auto-fetch controls. Small results come
+  back whole (everything behaves as before); large ones come back as a
+  capped preview + exact size + table cells, with Copy/Download fetching
+  the full text on demand. If the frame can't load, everything falls back
+  to the previous in-panel evaluation.
 - `vendor/jmespath.js` ([jmespath.js](https://github.com/jmespath/jmespath.js)
   0.16.0, MIT), `vendor/jsonpath-plus.js`
   ([jsonpath-plus](https://github.com/JSONPath-Plus/JSONPath) 10.3.0, MIT),
@@ -350,6 +360,8 @@ manifest.json          Manifest V3 (Chrome + Edge)
 src/interceptor.js     MAIN-world fetch/XHR interceptor + request upgrades
 src/content.js         Panel UI (isolated world, ShadowRoot)
 src/content.css        Panel styles (light + dark theme)
+src/evaluator.html     Off-thread evaluator page (hidden extension iframe)
+src/evaluator.js       Evaluator logic: dataset cache + query/export/diff
 src/query-utils.js     Pure helpers, shared with unit tests
 src/background.js      Service worker (Alt+G / Alt+Q commands)
 vendor/jmespath.js     Vendored JMESPath engine (MIT)
