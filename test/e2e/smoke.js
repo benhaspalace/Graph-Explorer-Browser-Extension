@@ -1172,6 +1172,22 @@ function check(name, ok, extra) {
     'panel follows GE dark theme',
     await page.evaluate(() => document.getElementById('gejq-host').classList.contains('gejq-theme-dark'))
   );
+  // In dark mode the query editor's caret must be light (white), not the
+  // black CodeMirror default.
+  const caretDark = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const content = shadow.querySelector('.gejq-query-editor .cm-content');
+    const cursor = shadow.querySelector('.gejq-query-editor .cm-cursor');
+    return {
+      caretColor: content ? getComputedStyle(content).caretColor : '',
+      cursorBorder: cursor ? getComputedStyle(cursor).borderLeftColor : 'none'
+    };
+  });
+  check(
+    'query editor caret is white in dark mode',
+    caretDark.caretColor === 'rgb(255, 255, 255)' && (caretDark.cursorBorder === 'none' || caretDark.cursorBorder === 'rgb(255, 255, 255)'),
+    JSON.stringify(caretDark)
+  );
   await page.evaluate(() => localStorage.removeItem('CURRENT_THEME'));
   await page.locator('.gejq-seg-btn', { hasText: 'JSON' }).click();
   await page.waitForTimeout(200);
@@ -1179,6 +1195,11 @@ function check(name, ok, extra) {
     'panel returns to OS theme when GE theme is unset',
     await page.evaluate(() => !document.getElementById('gejq-host').classList.contains('gejq-theme-dark'))
   );
+  const caretLight = await page.evaluate(() => {
+    const content = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-query-editor .cm-content');
+    return content ? getComputedStyle(content).caretColor : '';
+  });
+  check('query editor caret is dark in light mode', caretLight === 'rgb(36, 36, 36)', caretLight);
 
   // 10l. Graph Explorer's own background calls are hidden behind a toggle.
   const optionCountBefore = await page.evaluate(
