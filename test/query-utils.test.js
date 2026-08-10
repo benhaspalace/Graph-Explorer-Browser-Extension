@@ -1172,3 +1172,23 @@ test('csvCellText encodes objects and caps long cells', () => {
   assert.equal(GEJQ.csvCellText({ a: 1 }), '{"a":1}');
   assert.equal(GEJQ.csvCellText('x'.repeat(300)).length, 201);
 });
+
+test('sampleJson prunes arrays, keys, depth, and long strings', () => {
+  const big = {
+    '@odata.context': 'ctx',
+    value: Array.from({ length: 100 }, (unused, i) => ({
+      id: i,
+      displayName: 'User ' + i,
+      note: 'y'.repeat(500),
+      nested: { a: { b: { c: { d: { e: 1 } } } } }
+    }))
+  };
+  const sample = GEJQ.sampleJson(big);
+  assert.equal(sample.value.length, 5); // arrays capped
+  assert.ok(Object.keys(sample.value[0]).includes('displayName')); // keys survive
+  assert.ok(sample.value[0].note.length <= 121); // long strings truncated
+  assert.deepEqual(sample.value[0].nested.a, {}); // depth capped
+  assert.equal(sample['@odata.context'], 'ctx');
+  assert.equal(GEJQ.sampleJson(42), 42);
+  assert.equal(GEJQ.sampleJson(null), null);
+});

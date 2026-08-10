@@ -583,10 +583,14 @@
 
   // ------------------------------------------------- off-thread evaluation
 
-  // Datasets above this raw size are queried in the evaluator iframe
-  // (src/evaluator.html) — an extension-origin page Chrome hosts in the
-  // extension's own process, so its evaluations never block this tab's
-  // main thread. Smaller datasets keep the zero-latency local path.
+  // Queries ALWAYS run in the evaluator iframe (src/evaluator.html) when
+  // it is available — an extension-origin page Chrome hosts in the
+  // extension's own process, so evaluations never block this tab's main
+  // thread. The local synchronous path is only a fallback for when the
+  // frame cannot load (plus small datasets while it is still booting —
+  // this limit gates only that boot window). Large datasets are shipped
+  // to the evaluator directly by the interceptor (`remote` entries): the
+  // panel holds their metadata and a structural sample, never the data.
   var EVAL_LOCAL_LIMIT = 512 * 1024;
 
   var evaluator = {
@@ -629,6 +633,11 @@
       evaluator.pendingMain = null;
       evaluator.pendingExport = null;
       evaluator.pendingDiff = null;
+      try {
+        evaluator.frame.removeAttribute('data-gejq-ready'); // reloading
+      } catch (e) {
+        /* ignore */
+      }
       (document.body || document.documentElement).appendChild(evaluator.frame);
     }
   }
@@ -637,15 +646,22 @@
     return evaluator.ready && !evaluator.failed && !!evaluator.frame && evaluator.frame.isConnected;
   }
 
-  /** Should this response be queried off-thread? */
+  /** Should this response be queried off-thread? (Always, when possible.) */
   function remoteEligible(response) {
     return (
       evaluatorAvailable() &&
       !!response &&
-      typeof response.size === 'number' &&
-      response.size > EVAL_LOCAL_LIMIT &&
-      response.json !== undefined
+      !response.tooLarge &&
+      (response.remote === true || response.json !== undefined)
     );
+  }
+
+  /** The JSON shape-driven features may look at (sample for remote data). */
+  function responseShape(response) {
+    if (!response || response.tooLarge) {
+      return undefined;
+    }
+    return response.remote === true ? response.sample : response.json;
   }
 
   function evaluatorSend(message) {
@@ -659,6 +675,9 @@
 
   /** One dataset transfer per entry generation (upserts resend lazily). */
   function ensureDatasetSynced(response) {
+    if (response.remote === true) {
+      return; // the interceptor already delivered it straight to the evaluator
+    }
     if (evaluator.synced[response.id] === response) {
       return;
     }
@@ -702,6 +721,25 @@
     }
     evaluator.pendingMain = null;
     if (data.needDataset) {
+      if (pending.response.remote === true) {
+        // Interceptor-delivered dataset. It may simply still be in flight
+        // (chain commit racing the metadata) — retry once, then give up.
+        if (!pending.retried) {
+          setTimeout(function () {
+            if (outcomeKey() === pending.key && selectedResponse() === pending.response) {
+              requestEvaluation(pending.response, pending.key, { retried: true, record: pending.record });
+            }
+          }, 300);
+        } else if (outcomeKey() === pending.key) {
+          finishOutcome(
+            { value: undefined, error: 'This response is no longer cached — run the Graph query again.' },
+            pending.response,
+            pending.key,
+            false
+          );
+        }
+        return;
+      }
       delete evaluator.synced[pending.response.id];
       if (!pending.retried) {
         requestEvaluation(pending.response, pending.key, { retried: true, record: pending.record });
@@ -773,6 +811,30 @@
       evaluator.ready = true;
       evaluator.failed = false;
       evaluator.synced = {}; // a (re)load emptied the evaluator's cache
+      // Tell the MAIN-world interceptor it can stream datasets directly
+      // to the frame now (messages to a loading frame would be dropped).
+      try {
+        evaluator.frame.setAttribute('data-gejq-ready', '1');
+      } catch (e) {
+        /* ignore */
+      }
+      return;
+    }
+    if (data.type === 'gejq-dataset-ready') {
+      // A dataset the interceptor delivered directly is now queryable;
+      // its structural sample powers suggestions + property completion.
+      for (var r = 0; r < state.responses.length; r++) {
+        if (state.responses[r].id === data.id) {
+          state.responses[r].sample = data.sample;
+          break;
+        }
+      }
+      if (ui) {
+        var shown = selectedResponse();
+        if (shown && shown.id === data.id) {
+          renderSuggestions(responseShape(shown));
+        }
+      }
       return;
     }
     if (!ui) {
@@ -910,15 +972,15 @@
 
     // Suggestions depend on the response and language, not on the query —
     // refresh them even when the current query errors (e.g. right after
-    // a language switch left an incompatible query in the box).
-    renderSuggestions(response.json);
+    // a language switch left an incompatible query in the box). Remote
+    // datasets contribute their structural sample instead.
+    renderSuggestions(responseShape(response));
 
     if (
       !evaluator.ready &&
       !evaluator.failed &&
       evaluator.frame &&
-      typeof response.size === 'number' &&
-      response.size > EVAL_LOCAL_LIMIT
+      (response.remote === true || (typeof response.size === 'number' && response.size > EVAL_LOCAL_LIMIT))
     ) {
       // Big dataset but the evaluator is still booting — wait for it
       // rather than falling back to a blocking local evaluation.
@@ -943,12 +1005,23 @@
       return;
     }
     if (remoteEligible(response)) {
-      // Big dataset: evaluate in the extension-process iframe. The reply
-      // lands in handleEvaluationReply; the previous result stays visible.
+      // Evaluate in the extension-process iframe (always, when it is
+      // available). The reply lands in handleEvaluationReply; the
+      // previous result stays visible meanwhile.
       requestEvaluation(response, key, { record: record });
       return;
     }
     evaluator.pendingMain = null;
+    if (response.remote === true) {
+      // The dataset lives only in the (unavailable) evaluator.
+      finishOutcome(
+        { value: undefined, error: 'The off-thread evaluator is unavailable — re-run the Graph query to capture this response again.' },
+        response,
+        key,
+        false
+      );
+      return;
+    }
     finishOutcome(currentResult(), response, key, record);
   }
 
@@ -1028,7 +1101,13 @@
       output.appendChild(el('div', 'gejq-empty', 'Pick a different response in the "vs" dropdown to compare against.'));
       return;
     }
-    if (outcome.large || remoteEligible(response) || remoteEligible(baseline)) {
+    if (
+      outcome.large ||
+      response.remote === true ||
+      baseline.remote === true ||
+      remoteEligible(response) ||
+      remoteEligible(baseline)
+    ) {
       if (evaluatorAvailable()) {
         // Big data on either side — diff in the evaluator's process.
         ensureDatasetSynced(response);
@@ -1903,7 +1982,7 @@
     var result = GEJQ.queryCompletions(
       state.settings.queryLanguage,
       editor.getValue().slice(0, caret),
-      response && !response.tooLarge ? response.json : undefined
+      responseShape(response) // remote datasets complete from their sample
     );
     if (!result) {
       closeAutocomplete();
@@ -3602,7 +3681,7 @@
     if (!payload || typeof payload.id !== 'string' || typeof payload.url !== 'string') {
       return;
     }
-    if (payload.json === undefined && !payload.tooLarge) {
+    if (payload.json === undefined && !payload.tooLarge && payload.remote !== true) {
       return;
     }
     // Distinguish user-run queries from Graph Explorer's own background
@@ -3641,6 +3720,7 @@
       status: typeof payload.status === 'number' ? payload.status : 0,
       timestamp: typeof payload.timestamp === 'number' ? payload.timestamp : Date.now(),
       json: payload.json,
+      remote: payload.remote === true, // dataset lives in the evaluator only
       size: typeof payload.size === 'number' ? payload.size : 0,
       pages: pages,
       partial: payload.partial === true,

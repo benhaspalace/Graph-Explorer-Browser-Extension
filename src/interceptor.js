@@ -26,6 +26,7 @@
   var CONTROL_SOURCE = 'gejq-autofetch-control';
   var MAX_BODY_CHARS = 10 * 1024 * 1024; // 10 MB of JSON text is plenty
   var MAX_REQUEST_BODY_CHARS = 100 * 1024; // captured request bodies
+  var LARGE_DIRECT_LIMIT = 512 * 1024; // bodies above this go straight to the evaluator
   var GRAPH_HOSTS = [
     'graph.microsoft.com',
     'graph.microsoft.us',
@@ -108,6 +109,43 @@
     postTyped('graph-response', payload);
   }
 
+  /**
+   * The panel's hidden off-thread evaluator iframe, once the content
+   * script has marked it ready (data-gejq-ready — messages posted to a
+   * still-loading frame would be dropped silently). Returns
+   * { window, origin } or null; every use falls back to the legacy
+   * everything-through-the-panel path when null.
+   */
+  function evaluatorTarget() {
+    var frame = document.getElementById('gejq-evaluator');
+    if (!frame || !frame.contentWindow || frame.getAttribute('data-gejq-ready') !== '1') {
+      return null;
+    }
+    try {
+      return { window: frame.contentWindow, origin: new URL(frame.src).origin };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Ship data straight to the evaluator, skipping the page thread's
+   * expensive object clones through the panel. Returns false when the
+   * evaluator isn't available (callers keep the legacy path).
+   */
+  function sendToEvaluator(message) {
+    var target = evaluatorTarget();
+    if (!target) {
+      return false;
+    }
+    try {
+      target.window.postMessage(message, target.origin);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function postTyped(type, payload) {
     try {
       window.postMessage({ source: MESSAGE_SOURCE, type: type, payload: payload }, window.location.origin);
@@ -154,8 +192,17 @@
     } catch (e) {
       return null;
     }
-    entry.json = json;
     entry.size = text.length;
+    if (text.length > LARGE_DIRECT_LIMIT && sendToEvaluator({ type: 'gejq-dataset-text', id: entry.id, text: trimmed })) {
+      // Big body: hand the RAW TEXT to the evaluator (a string clone is a
+      // cheap memcpy; it re-parses on its own thread) and give the panel
+      // metadata only — the parsed dataset never crosses the page thread.
+      entry.remote = true;
+      post(entry);
+      entry.json = json; // kept locally only to drive the auto-fetch chain
+      return entry;
+    }
+    entry.json = json;
     post(entry);
     return entry;
   }
@@ -188,7 +235,7 @@
     postTyped('graph-fetch-progress', {
       url: chain.url,
       pages: chain.pages,
-      items: chain.combinedValue.length,
+      items: chain.totalItems,
       size: chain.totalSize,
       state: state,
       reason: reason || null
@@ -200,23 +247,12 @@
     if (chain.pages < 2) {
       return; // nothing beyond the original response — no entry to add
     }
-    var combined = {};
-    for (var key in chain.firstJson) {
-      if (Object.prototype.hasOwnProperty.call(chain.firstJson, key) && key !== '@odata.nextLink') {
-        combined[key] = chain.firstJson[key];
-      }
-    }
-    if (remainingNextLink) {
-      combined['@odata.nextLink'] = remainingNextLink;
-    }
-    combined.value = chain.combinedValue;
     var entry = {
       id: chain.id,
       method: chain.method,
       url: chain.url,
       status: chain.status,
       timestamp: Date.now(),
-      json: combined,
       size: chain.totalSize,
       pages: chain.pages,
       partial: flags.partial === true,
@@ -228,6 +264,32 @@
     if (chain.requestHeaders) {
       entry.requestHeaders = chain.requestHeaders;
     }
+    if (chain.streamed) {
+      // Streaming mode: the pages already live in the evaluator — commit
+      // them there and give the panel metadata only. The combined dataset
+      // never exists on this thread, so pausing/finishing never clones a
+      // multi-megabyte object graph through the page.
+      sendToEvaluator({
+        type: 'gejq-chain-commit',
+        id: chain.id,
+        nextLink: remainingNextLink || null,
+        final: flags.partial !== true
+      });
+      entry.remote = true;
+      post(entry);
+      return;
+    }
+    var combined = {};
+    for (var key in chain.firstJson) {
+      if (Object.prototype.hasOwnProperty.call(chain.firstJson, key) && key !== '@odata.nextLink') {
+        combined[key] = chain.firstJson[key];
+      }
+    }
+    if (remainingNextLink) {
+      combined['@odata.nextLink'] = remainingNextLink;
+    }
+    combined.value = chain.combinedValue;
+    entry.json = combined;
     post(entry);
   }
 
@@ -244,6 +306,10 @@
       return;
     }
     chain.state = 'done';
+    if (chain.streamed && chain.pages < 2) {
+      // Nothing will be posted — free the pages staged in the evaluator.
+      sendToEvaluator({ type: 'gejq-chain-abort', id: chain.id });
+    }
     postChainEntry(chain, remainingNextLink || null, {
       truncated: !!remainingNextLink,
       stopReason: remainingNextLink ? stopReason || 'stopped' : undefined
@@ -338,7 +404,17 @@
               return;
             }
             chain.totalSize += text.length;
-            chain.combinedValue = chain.combinedValue.concat(pageJson.value);
+            if (chain.streamed) {
+              // One small page-sized clone to the evaluator; this thread
+              // never accumulates the combined dataset.
+              if (!sendToEvaluator({ type: 'gejq-chain-page', id: chain.id, value: pageJson.value })) {
+                finalizeChain(chain, nextUrl, 'error'); // evaluator vanished mid-chain
+                return;
+              }
+            } else {
+              chain.combinedValue = chain.combinedValue.concat(pageJson.value);
+            }
+            chain.totalItems += pageJson.value.length;
             chain.pages += 1;
             var next = pageJson['@odata.nextLink'];
             if (typeof next !== 'string') {
@@ -414,16 +490,22 @@
       finalizeChain(activeFetch, activeFetch.nextUrl, 'stopped');
     }
     idCounter += 1;
+    var chainId = Date.now() + '-' + idCounter + '-pages';
+    // Streaming mode (evaluator present): pages accumulate off-thread and
+    // this world keeps counters only. Legacy mode otherwise.
+    var streamed = sendToEvaluator({ type: 'gejq-chain-start', id: chainId, firstJson: firstJson });
     activeFetch = {
-      id: Date.now() + '-' + idCounter + '-pages',
+      id: chainId,
       method: String(method || 'GET').toUpperCase(),
       url: firstEntry.url,
       status: firstEntry.status,
       requestHeaders: firstEntry.requestHeaders || null,
       headers: headers,
       firstJson: firstJson,
-      combinedValue: firstJson.value.slice(),
+      streamed: streamed,
+      combinedValue: streamed ? null : firstJson.value.slice(),
       pages: 1,
+      totalItems: firstJson.value.length,
       totalSize: firstEntry.size || 0,
       nextUrl: firstJson['@odata.nextLink'],
       state: 'running',
