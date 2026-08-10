@@ -462,7 +462,22 @@
 
 .gejq-query-editor .cm-content {
   padding: 5px 0 !important;
-  caret-color: var(--gejq-text);
+}
+
+/* The caret follows the theme text color (white in dark mode). CodeMirror's
+   baseTheme hard-codes a black caret for its light theme — which we always
+   use, since we theme via CSS variables rather than CM's dark theme — and an
+   `initial` caret on focus with !important, both injected after our styles.
+   Beat them with higher specificity + !important (incl. the focused state). */
+.gejq-panel .gejq-query-editor .cm-editor .cm-content,
+.gejq-panel .gejq-query-editor .cm-editor .cm-content:focus {
+  caret-color: var(--gejq-text) !important;
+}
+
+/* If CodeMirror ever draws its own cursor, tie that to the theme too. */
+.gejq-query-editor .cm-cursor,
+.gejq-query-editor .cm-dropCursor {
+  border-left-color: var(--gejq-text) !important;
 }
 
 .gejq-query-editor .cm-line {
