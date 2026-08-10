@@ -182,7 +182,15 @@ function check(name, ok, extra) {
     if (url.startsWith('https://graph.microsoft.com/')) {
       graphRequests.push({ url, headers: route.request().headers() });
       let body = SAMPLE_RESPONSE;
-      if (url.includes('pagedslow=1')) {
+      if (url.includes('bigsingle=1')) {
+        // Large single response (~1.5 MB) — exercises the interceptor's
+        // direct-to-evaluator text path.
+        const bigItems = [];
+        for (let i = 0; i < 20000; i++) {
+          bigItems.push({ id: 'u' + i, displayName: 'Big User ' + i, mail: 'biguser' + i + '@contoso.com' });
+        }
+        body = { value: bigItems };
+      } else if (url.includes('pagedslow=1')) {
         body = Object.assign({}, SAMPLE_RESPONSE, {
           '@odata.nextLink': 'https://graph.microsoft.com/v1.0/users?pagedslow=2'
         });
@@ -1482,6 +1490,33 @@ function check(name, ok, extra) {
     'large download exports the full off-thread result',
     largeBytes > 3000000 && largeHead.startsWith('['),
     largeBytes + ' bytes, starts ' + JSON.stringify(largeHead)
+  );
+
+  // 10p3. Large SINGLE responses are shipped by the interceptor straight
+  // to the evaluator as raw text — the panel receives metadata plus a
+  // structural sample (so suggestions still work) and never touches the
+  // parsed dataset; queries run off-thread from the first keystroke.
+  await page.evaluate(() => window.runGraphQuery('/v1.0/users?bigsingle=1'));
+  try {
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        return shadow.querySelector('.gejq-meta-right').textContent.includes('20000 items');
+      },
+      { timeout: 15000 }
+    );
+    check('interceptor-delivered large response queries off-thread', true);
+  } catch (e) {
+    check('interceptor-delivered large response queries off-thread', false, e.message.split('\n')[0]);
+  }
+  const bigSuggestions = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-suggestions .gejq-chip')).map((c) => c.textContent);
+  });
+  check(
+    'suggestions derive from the remote dataset sample',
+    bigSuggestions.some((t) => t.includes('displayName')),
+    bigSuggestions.join(' | ')
   );
 
   // 10q. History rows: hover copy, label, delete, confirm-clear.

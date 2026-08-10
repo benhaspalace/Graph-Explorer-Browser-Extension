@@ -61,8 +61,9 @@ within a few business days.
 Settings, the last query text, panel/layout state, and the query history
 (query text, language, timestamp, and the **method, URL, and sanitized
 headers** of the Graph request each query ran against). Captured response
-**bodies live only in page memory** and are cleared on reload — they are
-never persisted. Nothing is sent anywhere.
+**bodies live only in memory** — small ones in the page, large ones in the
+hidden evaluator frame's extension process — and are cleared on reload;
+they are never persisted. Nothing is sent anywhere.
 
 ## Supply-chain controls
 

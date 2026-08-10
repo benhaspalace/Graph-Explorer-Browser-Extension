@@ -11,7 +11,13 @@
  * datasets keep the panel's synchronous local path for zero latency.
  *
  * Protocol (window.postMessage, structured-clone JSON):
- *   in : { type: 'gejq-dataset',  id, json }
+ *   in : { type: 'gejq-dataset',      id, json }   (from the panel)
+ *   in : { type: 'gejq-dataset-text', id, text }   (from the interceptor —
+ *          a string clone is a cheap memcpy; parsing happens HERE)
+ *   in : { type: 'gejq-chain-start',  id, firstJson }      (auto-fetch)
+ *   in : { type: 'gejq-chain-page',   id, value }          (one page's items)
+ *   in : { type: 'gejq-chain-commit', id, nextLink }       (materialize)
+ *   in : { type: 'gejq-chain-abort',  id }                 (chain never posted)
  *   in : { type: 'gejq-evaluate', requestId, datasetId, language, query,
  *          valueLimit, sizeCeiling, sort }
  *   in : { type: 'gejq-export',   requestId, datasetId, language, query,
@@ -19,6 +25,9 @@
  *   in : { type: 'gejq-diff',     requestId, baseId, currentId, language,
  *          query }
  *   out: { source: 'gejq-evaluator', type: 'gejq-ready' }
+ *   out: { source: 'gejq-evaluator', type: 'gejq-dataset-ready', id, sample }
+ *          (a structural sample so shape-driven panel features work
+ *          without the dataset ever crossing back to the page thread)
  *   out: { source: 'gejq-evaluator', type: 'gejq-result'|'gejq-export-result'|
  *          'gejq-diff-result', requestId, … }
  *
@@ -38,6 +47,7 @@
   var DIFF_DETAIL_CHARS = 160;
 
   var datasets = {}; // id -> { json, gen, touched }
+  var chains = {}; // id -> { firstJson, values: [array, …] } (auto-fetch staging)
   var generationCounter = 0;
   var touchCounter = 0;
   // One-slot result cache: re-sorting a table or exporting right after an
@@ -60,6 +70,42 @@
         delete datasets[ids[i]];
       }
     }
+  }
+
+  /** Announce a stored dataset to the panel with a structural sample. */
+  function announceDataset(id) {
+    if (window.parent && window.parent !== window && datasets[id]) {
+      window.parent.postMessage(
+        { source: 'gejq-evaluator', type: 'gejq-dataset-ready', id: id, sample: GEJQ.sampleJson(datasets[id].json) },
+        '*'
+      );
+    }
+  }
+
+  /** Materialize an auto-fetch chain's staged pages into a dataset. */
+  function commitChain(id, nextLink, final) {
+    var chain = chains[id];
+    if (!chain) {
+      return;
+    }
+    var combined = {};
+    for (var key in chain.firstJson) {
+      if (Object.prototype.hasOwnProperty.call(chain.firstJson, key) && key !== '@odata.nextLink') {
+        combined[key] = chain.firstJson[key];
+      }
+    }
+    if (typeof nextLink === 'string' && nextLink !== '') {
+      combined['@odata.nextLink'] = nextLink;
+    }
+    combined.value = Array.prototype.concat.apply(
+      Array.isArray(chain.firstJson.value) ? chain.firstJson.value : [],
+      chain.values
+    );
+    if (final) {
+      delete chains[id]; // the chain is over — free the staged pages
+    }
+    storeDataset(id, combined);
+    announceDataset(id);
   }
 
   function evaluate(language, json, query) {
@@ -207,6 +253,27 @@
     try {
       if (data.type === 'gejq-dataset' && typeof data.id === 'string') {
         storeDataset(data.id, data.json);
+      } else if (data.type === 'gejq-dataset-text' && typeof data.id === 'string' && typeof data.text === 'string') {
+        // Raw text from the interceptor — parsing happens on THIS thread,
+        // so the page never pays for it.
+        var parsed;
+        try {
+          parsed = JSON.parse(data.text);
+        } catch (e) {
+          return;
+        }
+        storeDataset(data.id, parsed);
+        announceDataset(data.id);
+      } else if (data.type === 'gejq-chain-start' && typeof data.id === 'string') {
+        chains[data.id] = { firstJson: data.firstJson, values: [] };
+      } else if (data.type === 'gejq-chain-page' && typeof data.id === 'string') {
+        if (chains[data.id] && Array.isArray(data.value)) {
+          chains[data.id].values.push(data.value);
+        }
+      } else if (data.type === 'gejq-chain-commit' && typeof data.id === 'string') {
+        commitChain(data.id, data.nextLink, data.final === true);
+      } else if (data.type === 'gejq-chain-abort' && typeof data.id === 'string') {
+        delete chains[data.id];
       } else if (data.type === 'gejq-evaluate') {
         handleEvaluate(data, reply);
       } else if (data.type === 'gejq-export') {

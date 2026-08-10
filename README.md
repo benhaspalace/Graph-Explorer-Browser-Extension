@@ -265,15 +265,19 @@ engine covers core jq, without the regex builtins).
   `MutationObserver` re-attaches the panel whenever Graph Explorer's React app
   re-renders that area.
 - `src/evaluator.html` + `src/evaluator.js` form a hidden extension-origin
-  iframe that Chrome hosts in the extension's own process. Datasets over
-  512 KB are cached there and every query evaluation, exact-size walk,
-  table sort, export serialization, and diff over them runs on that
-  process's thread — a multi-second jq run over a 100 MB dataset no longer
-  blocks typing, the page, or the auto-fetch controls. Small results come
-  back whole (everything behaves as before); large ones come back as a
-  capped preview + exact size + table cells, with Copy/Download fetching
-  the full text on demand. If the frame can't load, everything falls back
-  to the previous in-panel evaluation.
+  iframe that Chrome hosts in the extension's own process — every query
+  evaluation, exact-size walk, table sort, export serialization, and diff
+  runs on that process's thread whenever the frame is available, so a
+  multi-second jq run over a 100 MB dataset never blocks typing, the
+  page, or the auto-fetch controls. Large datasets never even touch the
+  page thread: the interceptor streams auto-fetch pages into the
+  evaluator one page at a time and ships large single responses as raw
+  text (parsed there), while the panel holds only metadata plus a small
+  structural sample that powers suggestions and property completion.
+  Small results come back whole (everything behaves as before); large
+  ones come back as a capped preview + exact size + table cells, with
+  Copy/Download fetching the full text on demand. If the frame can't
+  load, everything falls back to the previous in-panel evaluation.
 - `vendor/jmespath.js` ([jmespath.js](https://github.com/jmespath/jmespath.js)
   0.16.0, MIT), `vendor/jsonpath-plus.js`
   ([jsonpath-plus](https://github.com/JSONPath-Plus/JSONPath) 10.3.0, MIT),
@@ -294,7 +298,8 @@ requests of its own — the only exception is the auto-fetch feature (on by
 default; can be turned off), which requests the *next pages of the same Graph
 query* by replaying that request's own headers to Microsoft Graph hosts only;
 they are never read, stored, or sent elsewhere.
-Captured responses live only in the page's memory (cleared on reload). What is
+Captured responses live only in memory — small ones in the page, large ones
+in the extension's hidden evaluator frame — and are cleared on reload. What is
 persisted via `chrome.storage.local`: your settings, your last query text,
 panel state, and the query history (query text, language, timestamp, and the
 method, URL, and sanitized headers of the Graph request it ran against —

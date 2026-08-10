@@ -224,6 +224,36 @@
     return { text: parts.join(''), truncated: truncated, length: size, overflow: overflow };
   }
 
+  /**
+   * Small structural sample of a JSON value: arrays capped at 5 items,
+   * objects at 50 keys, depth 4, long strings truncated. Enough for the
+   * shape-driven features (suggestions, property completion) to work on
+   * datasets that live only in the off-thread evaluator — the sample is
+   * what crosses back instead of the dataset itself.
+   */
+  function sampleJson(value, depth) {
+    var level = depth || 0;
+    if (value === null || typeof value !== 'object') {
+      return typeof value === 'string' && value.length > 120 ? value.slice(0, 120) + '…' : value;
+    }
+    if (level >= 4) {
+      return Array.isArray(value) ? [] : {};
+    }
+    if (Array.isArray(value)) {
+      var sampled = [];
+      for (var i = 0; i < value.length && i < 5; i++) {
+        sampled.push(sampleJson(value[i], level + 1));
+      }
+      return sampled;
+    }
+    var keys = Object.keys(value);
+    var out = {};
+    for (var k = 0; k < keys.length && k < 50; k++) {
+      out[keys[k]] = sampleJson(value[keys[k]], level + 1);
+    }
+    return out;
+  }
+
   /** Compact display form of a Graph URL: path + query, origin stripped. */
   function summarizeUrl(url, maxLength) {
     var max = maxLength || 80;
@@ -3356,6 +3386,7 @@
     csvShape: csvShape,
     csvCellText: csvCellText,
     csvPreview: csvPreview,
+    sampleJson: sampleJson,
     pathQuery: pathQuery,
     diffJson: diffJson,
     upsertQueryHistory: upsertQueryHistory,
