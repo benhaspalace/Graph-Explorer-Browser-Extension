@@ -38,26 +38,21 @@ try {
 // Enter also opens Graph Explorer: the button is focused when the popup opens.
 openExplorerLink.focus();
 
-var LANGUAGE_KEYS = ['jmespath', 'jsonpath', 'jq'];
-
-function validLanguage(value) {
-  return LANGUAGE_KEYS.indexOf(value) !== -1 ? value : 'jmespath';
-}
-
+// Defaults and validation are shared with the panel (GEJQ.normalizeSettings)
+// so the popup and content script can never disagree about them.
 function render(settings) {
-  languageSelect.value = validLanguage(settings.queryLanguage);
-  // advancedQuery, autoSignIn, and autoFetchNextLink all default to on.
-  advancedQueryBox.checked = settings.advancedQuery !== false;
-  autoSignInBox.checked = settings.autoSignIn !== false;
-  autoFetchBox.checked = settings.autoFetchNextLink !== false;
-  autoFetchPagesInput.value = String(GEJQ.clampInt(settings.autoFetchMaxPages, 1, 1000, 50));
-  autoFetchMbInput.value = String(GEJQ.clampInt(settings.autoFetchMaxMb, 1, 50, 10));
-  showBackgroundBox.checked = settings.showBackgroundRequests === true;
-  richEditorBox.checked = settings.richEditor !== false;
-  var limit = typeof settings.historyLimit === 'number' && settings.historyLimit >= 0 ? settings.historyLimit : 50;
-  historyUnlimitedBox.checked = limit === 0;
-  historyLimitInput.disabled = limit === 0;
-  historyLimitInput.value = limit === 0 ? '' : String(limit);
+  var normalized = GEJQ.normalizeSettings(settings);
+  languageSelect.value = normalized.queryLanguage;
+  advancedQueryBox.checked = normalized.advancedQuery;
+  autoSignInBox.checked = normalized.autoSignIn;
+  autoFetchBox.checked = normalized.autoFetchNextLink;
+  autoFetchPagesInput.value = String(normalized.autoFetchMaxPages);
+  autoFetchMbInput.value = String(normalized.autoFetchMaxMb);
+  showBackgroundBox.checked = normalized.showBackgroundRequests;
+  richEditorBox.checked = normalized.richEditor;
+  historyUnlimitedBox.checked = normalized.historyLimit === 0;
+  historyLimitInput.disabled = normalized.historyLimit === 0;
+  historyLimitInput.value = normalized.historyLimit === 0 ? '' : String(normalized.historyLimit);
 }
 
 chrome.storage.local.get([STORAGE_KEY_SETTINGS], function (items) {
@@ -77,7 +72,7 @@ function save() {
   // would silently overwrite them.
   chrome.storage.local.get([STORAGE_KEY_SETTINGS], function (items) {
     var settings = items[STORAGE_KEY_SETTINGS] || {};
-    settings.queryLanguage = validLanguage(languageSelect.value);
+    settings.queryLanguage = GEJQ.normalizeSettings({ queryLanguage: languageSelect.value }).queryLanguage;
     settings.advancedQuery = advancedQueryBox.checked;
     settings.autoSignIn = autoSignInBox.checked;
     settings.autoFetchNextLink = autoFetchBox.checked;
@@ -89,6 +84,7 @@ function save() {
     var toStore = {};
     toStore[STORAGE_KEY_SETTINGS] = settings;
     chrome.storage.local.set(toStore);
+    render(settings); // show the clamped values, not what was typed
   });
 }
 

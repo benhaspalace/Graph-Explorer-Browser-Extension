@@ -6,14 +6,8 @@ Run a Graph query, then filter, reshape, sort, and export the JSON response
 with [JMESPath](https://jmespath.org/) — the same query language as Azure CLI's
 `--query` option — or with [JSONPath](https://github.com/JSONPath-Plus/JSONPath).
 
-<!--
-  Build/test badge for THIS branch's README. GitHub serves the README from
-  the branch you are viewing, so the badge tracks the current branch — this
-  branch's copy points at this branch. On `main`, this line reads
-  ?branch=main (…?query=branch%3Amain); update the branch name to match
-  whatever branch a copy of this README lives on.
--->
-[![Build & tests](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml/badge.svg?branch=claude/graph-explorer-json-query-9xez2b)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml?query=branch%3Aclaude%2Fgraph-explorer-json-query-9xez2b)
+<!-- The badge tracks main so it never goes stale after a feature branch merges. -->
+[![Build & tests](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/actions/workflows/build.yml?query=branch%3Amain)
 
 The **Build** workflow runs the unit tests, the offline end-to-end smoke
 test, and the packaging step on every push; the badge above shows the
@@ -74,13 +68,19 @@ status for this branch.
   may ask you to allow the sign-in popup).
 - **Auto-fetch all pages** *(on by default)* — follow the `@odata.nextLink`
   chain and add the combined dataset to the response list, so you can query
-  the entire result set at once. While pages stream in, the panel shows a live
-  progress line (pages · items · size) with a **Cancel** link that keeps what
-  was fetched so far. The page-count and data-size limits are configurable
-  (defaults: 50 pages / 10 MB); if a query exceeds them the combined entry is
-  marked *incomplete* and the panel shows a warning. The extension replays the
-  original request's own headers for the follow-up pages; nothing is stored.
-  Turn it off in the settings if you want only the exact request you ran.
+  the entire result set at once. While pages stream in, the metrics row
+  shows live progress (pages · items · size) with a leading **⏸ Pause**
+  button and a **Stop** link; paused chains offer **▶ Resume**, **+1**
+  (fetch one page, then pause again), and **■ Stop**. The configured
+  page-count and data-size limits (defaults: 50 pages / 10 MB) are
+  checkpoints, not hard stops: reaching one pauses the chain, and Resume
+  or +1 continue past it — each Resume grants a fresh budget. The growing
+  dataset is queryable at every pause, the response line shows how many
+  pages it holds ("auto-fetched · N pages"), and a stopped or failed chain
+  is labeled honestly ("stopped" / "error" — never blamed on a limit). The
+  extension replays the original request's own headers for the follow-up
+  pages; nothing is stored. Toggle the feature from the ⟳ button next to
+  the response list or in the settings.
 - **Response history** — the last 25 Graph responses are kept (in memory
   only); pick any of them from the dropdown to query it.
 - **Query history** — queries you run (Enter, or clicking a suggestion) are
@@ -102,6 +102,17 @@ status for this branch.
   confirming second click, and **Export**/**Import** move the whole query
   library between browsers as a JSON file (imports merge, keeping stars,
   names, and tags).
+- **Graph query equivalent (⇗)** — a button next to the query box shows
+  the Microsoft Graph (OData) equivalent of the current query: filters,
+  field picks, sorting, slicing, and counts become `$filter`, `$select`,
+  `$orderby`, `$top`/`$skip`, and `$count=true` merged into the captured
+  request's URL, ready to **Copy** or **Load ↗** into Graph Explorer.
+  Translation is best-effort per part: whatever cannot run server-side
+  (reshaping, regex, complex predicates) is shown as a highlighted
+  *client-side* residual query — click it to run exactly that part here
+  against the server-filtered response for the same result. Works in all
+  three languages; the button is disabled when nothing can be translated
+  (the tooltip says why).
 - **Smart suggestions** — one-click query chips generated from the shape of
   the current response in the selected language, with a link to the
   language's documentation in the same section.
@@ -189,8 +200,8 @@ Click the toolbar icon to open the settings popup:
 | Query language | JMESPath | JMESPath, JSONPath, or jq (also switchable in the panel) |
 | Advanced queries | on | Visibly adds `$count=true` (URI field) + `ConsistencyLevel: eventual` (Request headers view) for `$filter`/`$search`/`$orderby` queries |
 | Auto sign-in | on | Starts the sign-in flow when you open Graph Explorer signed out |
-| Auto-fetch all pages | on | Follows `@odata.nextLink` and adds the combined dataset to the response list (turn off to make only the exact request you ran) |
-| Auto-fetch limits | 50 pages / 10 MB | Stops the chain at these limits; the panel warns when a dataset was cut off |
+| Auto-fetch all pages | on | Follows `@odata.nextLink` and adds the combined dataset to the response list (also toggleable from the panel's ⟳ button) |
+| Auto-fetch limits | 50 pages / 10 MB | Pauses the chain at these checkpoints — Resume/+1 in the panel continue past them |
 | Show background requests | off | Reveal Graph Explorer's own requests in the response list (marked ⚙) |
 | Syntax-highlighting query editor | on | CodeMirror editor (highlighting, bracket matching, undo); turn off for a plain text box |
 | Query history limit | 50 | How many distinct queries to keep (checkbox for unlimited) |

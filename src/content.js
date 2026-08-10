@@ -29,21 +29,11 @@
   var STORAGE_KEY_QUERY = 'gejq.lastQuery';
   var STORAGE_KEY_COLLAPSED = 'gejq.embedCollapsed';
   var STORAGE_KEY_FORMAT = 'gejq.exportFormat';
+  var STORAGE_KEY_COPY_FORMAT = 'gejq.copyFormat';
   var STORAGE_KEY_SPLIT = 'gejq.splitPct';
   var STORAGE_KEY_SETTINGS = 'gejq.settings';
   var STORAGE_KEY_QUERY_HISTORY = 'gejq.queryHistory';
   var AUTO_SIGNIN_GUARD = 'gejq.autoSignInAttempted';
-  var DEFAULT_SETTINGS = Object.freeze({
-    advancedQuery: true,
-    autoSignIn: true,
-    autoFetchNextLink: true,
-    autoFetchMaxPages: 50,
-    autoFetchMaxMb: 10,
-    queryLanguage: 'jmespath',
-    historyLimit: 50, // 0 = unlimited
-    showBackgroundRequests: false,
-    richEditor: true // CodeMirror editor by default; can fall back to a plain textarea
-  });
   // The signed-out "profile view" button in Graph Explorer's top bar —
   // clicking it starts the sign-in flow.
   var SIGN_IN_SELECTORS = ['button[aria-label="Sign in" i]', 'button[aria-label="sign in to graph explorer" i]'];
@@ -109,17 +99,23 @@
     diff: { active: false, baseId: null }, // compare-mode state
     diffText: '', // exportable text of the last rendered diff
     splitPct: 50, // width of the embedded panel as % of the results area
-    settings: normalizeSettings(null), // fresh mutable copy of the defaults
+    settings: GEJQ.normalizeSettings(null), // fresh mutable copy of the defaults
     queryHistory: [], // executed queries, newest first (persisted)
-    historyFilter: { text: '', sinceMs: 0, tags: [] } // panel-session only
+    historyFilter: { text: '', sinceMs: 0, tags: [] }, // panel-session only
+    lastOutcome: null, // result of the last runQuery evaluation (avoids re-running)
+    lastOutcomeKey: '', // (response, language, query) the evaluation belongs to
+    graphEqOpen: false // Graph (OData) equivalent panel visibility
   };
 
   var ui = null; // populated by buildUi()
   var runTimer = null;
   var embedTimer = null;
+  var queryStoreTimer = null; // debounces per-keystroke query persistence
   var manualCounter = 0;
   var lastRunInteraction = 0; // when the user last ran a query in Graph Explorer
   var autocomplete = { open: false, result: null, activeIndex: 0 }; // query-input completion state
+  var fetchProgress = null; // latest auto-fetch progress payload (null = idle)
+  var suggestionsCache = { key: '', json: undefined }; // skips redundant re-renders
 
   // ---------------------------------------------------------------- storage
 
@@ -161,6 +157,9 @@
     node.type = 'button';
     if (title) {
       node.title = title;
+      // Icon-only buttons (📋, ✕, ⇄, …) would otherwise be announced as
+      // emoji names — the tooltip doubles as the accessible name.
+      node.setAttribute('aria-label', title);
     }
     node.addEventListener('click', onClick);
     return node;
@@ -394,38 +393,40 @@
   /**
    * Render the query result: sortable table in CSV mode (when the result
    * is CSV-able), interactive tree in Tree mode, otherwise pretty JSON.
-   * Returns { mode, size } — size is the serialized length.
+   * Returns { mode, size, sizeIsLowerBound } — size is the serialized
+   * length. Serialization is capped at RENDER_LIMIT characters
+   * (GEJQ.stringifyLimited), so huge auto-fetched datasets never build a
+   * full multi-megabyte string on every keystroke — that froze the tab.
+   * Copy/Download still serialize the full result on demand.
    */
   function renderResult(value) {
     var output = ui.resultOutput;
     clearChildren(output);
     if (value === undefined) {
       output.appendChild(el('div', 'gejq-empty', 'The query returned no result (undefined).'));
-      return { mode: 'json', size: 0 };
+      return { mode: 'json', size: 0, sizeIsLowerBound: false };
     }
-    var serialized = JSON.stringify(value, null, 2);
-    if (typeof serialized !== 'string') {
-      serialized = String(value);
-    }
+    var limited = GEJQ.stringifyLimited(value, RENDER_LIMIT);
+    var text = typeof limited.text === 'string' ? limited.text : String(value);
+    var size = limited.length;
     if (state.format === 'csv' && GEJQ.csvEligible(value)) {
       renderTable(output, value);
-      return { mode: 'csv', size: serialized.length };
+      return { mode: 'csv', size: size, sizeIsLowerBound: limited.truncated };
     }
     if (state.format === 'tree') {
       renderTree(output, value);
-      return { mode: 'tree', size: serialized.length };
+      return { mode: 'tree', size: size, sizeIsLowerBound: limited.truncated };
     }
-    var text = serialized;
-    if (text.length > RENDER_LIMIT) {
+    if (limited.truncated) {
       output.appendChild(
         el(
           'div',
           'gejq-notice',
-          'Result is too large to display (' + GEJQ.formatBytes(text.length) + '). Showing the first part — use Copy or Download for the full result.'
+          'Result is large (over ' + GEJQ.formatBytes(RENDER_LIMIT) + ' of JSON). Showing the first part — use Copy or Download for the full result.'
         )
       );
-      output.appendChild(el('pre', 'gejq-json', text.slice(0, RENDER_LIMIT) + '\n…'));
-      return { mode: 'json', size: text.length };
+      output.appendChild(el('pre', 'gejq-json', text + '\n…'));
+      return { mode: 'json', size: size, sizeIsLowerBound: true };
     }
     var pre = el('pre', 'gejq-json');
     if (text.length > HIGHLIGHT_LIMIT) {
@@ -434,7 +435,7 @@
       appendHighlightedJson(pre, text);
     }
     output.appendChild(pre);
-    return { mode: 'json', size: text.length };
+    return { mode: 'json', size: size, sizeIsLowerBound: false };
   }
 
   // ------------------------------------------------------------ query logic
@@ -508,6 +509,24 @@
     }
   }
 
+  /** Cache key for runQuery's evaluation: what it was computed against. */
+  function outcomeKey() {
+    var response = selectedResponse();
+    return (response ? response.id : '') + '|' + state.settings.queryLanguage + '|' + state.query;
+  }
+
+  /**
+   * The last runQuery evaluation when still current, else a fresh one —
+   * so Copy/Download/recordQuery never re-run the query on big datasets
+   * just to read the value runQuery already computed.
+   */
+  function currentOutcome() {
+    if (state.lastOutcome && state.lastOutcomeKey === outcomeKey()) {
+      return state.lastOutcome;
+    }
+    return currentResult();
+  }
+
   /**
    * Fill the response row: a live/pinned badge plus the full request
    * line (timestamp · METHOD url → status) as selectable text — unlike
@@ -531,7 +550,7 @@
       : 'Pinned to this response — pick the newest entry in the dropdown to follow new responses again';
     var status = response.manual ? (response.method === 'PASTE' ? 'pasted' : '') : '→ ' + response.status;
     if (response.pages) {
-      status += ' · ' + response.pages + ' pages' + (response.truncated ? ', incomplete' : '');
+      status += ' · ' + response.pages + ' pages' + (response.partial ? ' so far' : response.truncated ? ', incomplete' : '');
     }
     ui.responseText.value =
       GEJQ.formatTimestamp(response.timestamp) + ' · ' + response.method + ' ' + response.url + ' ' + status +
@@ -539,10 +558,21 @@
     ui.responseText.title = ui.responseText.value;
   }
 
-  /** Set the warning line (also drops any live auto-fetch progress). */
   function setWarning(text) {
-    ui.warning.removeAttribute('data-progress');
     ui.warning.textContent = text;
+  }
+
+  /**
+   * Honest description of why an auto-fetched dataset is incomplete:
+   * a user stop and a page error are named as such — never blamed on a
+   * configured limit (limits pause the chain now; they don't end it).
+   */
+  function truncationWarning(response) {
+    var summary = response.pages + ' pages (' + GEJQ.formatBytes(response.size) + ') were fetched — this dataset is incomplete.';
+    if (response.stopReason === 'error') {
+      return '⚠ Auto-fetch hit an error: only ' + summary;
+    }
+    return '⚠ Auto-fetch was stopped: only ' + summary;
   }
 
   function runQuery() {
@@ -551,6 +581,7 @@
     syncTheme();
 
     if (!response) {
+      state.lastOutcome = null;
       ui.error.textContent = '';
       setWarning('');
       ui.meta.textContent = '';
@@ -566,10 +597,12 @@
         )
       );
       updateExportButtons();
+      renderGraphEquivalent();
       return;
     }
 
     if (response.tooLarge) {
+      state.lastOutcome = null;
       ui.error.textContent = '';
       setWarning('');
       ui.meta.textContent = '';
@@ -583,14 +616,11 @@
         )
       );
       updateExportButtons();
+      renderGraphEquivalent();
       return;
     }
 
-    setWarning(
-      response.truncated
-        ? '⚠ Auto-fetch stopped early: only ' + response.pages + ' pages (' + GEJQ.formatBytes(response.size) + ') were fetched before hitting the configured limit — this dataset is incomplete. Raise the auto-fetch limits in the extension settings to fetch more.'
-        : ''
-    );
+    setWarning(response.truncated ? truncationWarning(response) : '');
 
     // Suggestions depend on the response and language, not on the query —
     // refresh them even when the current query errors (e.g. right after
@@ -598,9 +628,12 @@
     renderSuggestions(response.json);
 
     var outcome = currentResult();
+    state.lastOutcome = outcome; // reused by recordQuery/exportPayload — no re-evaluation
+    state.lastOutcomeKey = outcomeKey();
     if (outcome.error) {
       ui.error.textContent = outcome.error;
       updateExportButtons(outcome);
+      renderGraphEquivalent();
       return; // keep previous result visible while the user types
     }
     ui.error.textContent = '';
@@ -613,6 +646,7 @@
     if (state.diff.active) {
       renderDiffView(response, outcome.value);
       updateExportButtons(outcome);
+      renderGraphEquivalent();
       return;
     }
     var rendered = renderResult(outcome.value);
@@ -622,9 +656,13 @@
     ui.meta.textContent = '';
     ui.metaRight.textContent =
       GEJQ.describeResult(outcome.value) +
-      (rendered.size > 0 ? ' · ' + GEJQ.formatBytes(rendered.size) : '') +
-      (rendered.mode === 'csv' ? ' · table view' : rendered.mode === 'tree' ? ' · tree view' : '');
+      (rendered.size > 0 ? ' · ' + (rendered.sizeIsLowerBound ? '≥ ' : '') + GEJQ.formatBytes(rendered.size) : '') +
+      (rendered.mode === 'csv' ? ' · table view' : rendered.mode === 'tree' ? ' · tree view' : '') +
+      (response.pages >= 2
+        ? ' · auto-fetched · ' + response.pages + ' pages' + (response.partial ? ' so far' : response.truncated ? ' (incomplete)' : '')
+        : '');
     updateExportButtons(outcome);
+    renderGraphEquivalent();
   }
 
   /** Compare mode: the current query applied to baseline vs selected. */
@@ -683,6 +721,16 @@
     runTimer = setTimeout(runQuery, 180);
   }
 
+  function scheduleQueryStore() {
+    if (queryStoreTimer) {
+      clearTimeout(queryStoreTimer);
+    }
+    queryStoreTimer = setTimeout(function () {
+      queryStoreTimer = null;
+      storageSet(STORAGE_KEY_QUERY, state.query);
+    }, 500);
+  }
+
   // ------------------------------------------------------------- exporting
 
   /** The current result in the selected export format, or null. */
@@ -693,7 +741,7 @@
       }
       return { text: state.diffText, filename: GEJQ.exportFilename('', 'txt'), mime: 'text/plain' };
     }
-    var outcome = currentResult();
+    var outcome = currentOutcome();
     if (outcome.error || outcome.value === undefined) {
       return null;
     }
@@ -729,7 +777,7 @@
    */
   function updateExportButtons(outcome) {
     if (outcome === undefined) {
-      outcome = currentResult();
+      outcome = currentOutcome();
     }
     var hasResult = !outcome.error && outcome.value !== undefined;
     var csvOk = hasResult && GEJQ.csvEligible(outcome.value);
@@ -762,25 +810,21 @@
 
   // -------------------------------------------------------------- settings
 
-  function normalizeSettings(raw) {
-    var historyLimit = raw && typeof raw.historyLimit === 'number' && raw.historyLimit >= 0
-      ? Math.floor(raw.historyLimit)
-      : DEFAULT_SETTINGS.historyLimit;
-    return {
-      advancedQuery: !raw || raw.advancedQuery !== false,
-      autoSignIn: !raw || raw.autoSignIn !== false,
-      autoFetchNextLink: !raw || raw.autoFetchNextLink !== false,
-      autoFetchMaxPages: GEJQ.clampInt(raw && raw.autoFetchMaxPages, 1, 1000, DEFAULT_SETTINGS.autoFetchMaxPages),
-      autoFetchMaxMb: GEJQ.clampInt(raw && raw.autoFetchMaxMb, 1, 50, DEFAULT_SETTINGS.autoFetchMaxMb),
-      queryLanguage: raw && LANGUAGES[raw.queryLanguage] ? raw.queryLanguage : DEFAULT_SETTINGS.queryLanguage,
-      historyLimit: historyLimit,
-      showBackgroundRequests: !!raw && raw.showBackgroundRequests === true,
-      richEditor: !raw || raw.richEditor !== false
-    };
-  }
-
   function saveSettings() {
     storageSet(STORAGE_KEY_SETTINGS, state.settings);
+  }
+
+  /** Reflect the auto-fetch setting on the panel's ⟳ toggle chip. */
+  function applyAutoFetchToggle() {
+    if (!ui || !ui.autoFetchToggle) {
+      return;
+    }
+    var on = state.settings.autoFetchNextLink;
+    ui.autoFetchToggle.classList.toggle('gejq-tag-active', on);
+    ui.autoFetchToggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+    ui.autoFetchToggle.title =
+      'Auto-fetch all pages (@odata.nextLink): ' + (on ? 'on' : 'off') + ' — click to turn ' + (on ? 'off' : 'on');
+    ui.autoFetchToggle.setAttribute('aria-label', ui.autoFetchToggle.title);
   }
 
   /** Forward settings the MAIN-world interceptor needs via postMessage. */
@@ -938,7 +982,7 @@
   function optionLabel(entry) {
     var status = entry.manual ? 'pasted' : entry.status;
     if (entry.pages) {
-      status += ' · ' + entry.pages + ' pages' + (entry.truncated ? ', incomplete' : '');
+      status += ' · ' + entry.pages + ' pages' + (entry.partial ? ' so far' : entry.truncated ? ', incomplete' : '');
     }
     return (
       (entry.background ? '⚙ ' : '') +
@@ -1010,7 +1054,7 @@
 
   /** Feed the current query result back in as a new queryable source. */
   function pinCurrentResult() {
-    var outcome = currentResult();
+    var outcome = currentOutcome();
     if (outcome.error || outcome.value === undefined) {
       return;
     }
@@ -1028,7 +1072,7 @@
       manual: true,
       timestamp: Date.now(),
       json: outcome.value,
-      size: JSON.stringify(outcome.value) ? JSON.stringify(outcome.value).length : 0
+      size: GEJQ.stringifyLimited(outcome.value, RENDER_LIMIT).length
     });
     state.selectedId = id;
     refreshHistorySelect();
@@ -1036,8 +1080,22 @@
   }
 
   function addResponse(entry) {
-    state.responses.unshift(entry);
-    state.responses = GEJQ.trimHistory(state.responses, MAX_HISTORY);
+    // Auto-fetch chains keep a stable entry id and post updates as pages
+    // accumulate — replace the existing entry in place instead of adding.
+    var replaced = false;
+    for (var i = 0; i < state.responses.length; i++) {
+      if (state.responses[i].id === entry.id) {
+        state.responses[i] = entry;
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      state.responses.unshift(entry);
+      // Manual sources (pinned results, pasted JSON) are counted apart so
+      // a stream of new responses can never push them out.
+      state.responses = GEJQ.trimResponses(state.responses, MAX_HISTORY);
+    }
     var visible = !entry.background || state.settings.showBackgroundRequests;
     // Keep the selection on the newest live response while following, but
     // never auto-jump onto a manual pinned-result snapshot.
@@ -1048,8 +1106,12 @@
       refreshHistorySelect();
       updateBadge();
       if (visible) {
-        pulseFab();
-        if (state.open && state.followLatest) {
+        if (!replaced) {
+          pulseFab();
+        }
+        // Re-run for updates to the shown entry too (stepping through
+        // pages while pinned to the growing dataset).
+        if (state.open && (state.followLatest || state.selectedId === entry.id)) {
           runQuery();
         }
       }
@@ -1072,6 +1134,13 @@
   // ------------------------------------------------------------ suggestions
 
   function renderSuggestions(json) {
+    // Suggestions depend only on (response, language) — skip the rebuild
+    // when neither changed (runQuery calls this on every keystroke).
+    if (suggestionsCache.json === json && suggestionsCache.key === state.settings.queryLanguage) {
+      return;
+    }
+    suggestionsCache.json = json;
+    suggestionsCache.key = state.settings.queryLanguage;
     var container = ui.suggestions;
     clearChildren(container);
     // The section stays visible for the documentation reference even when
@@ -1098,6 +1167,194 @@
     runQuery();
     recordQuery();
     ui.queryEditor.focus();
+  }
+
+  // ----------------------------------------- Graph (OData) equivalent view
+
+  /** `$filter=…&$select=…` display text when there is no URL to merge into. */
+  function graphParamsText(params) {
+    var pairs = [];
+    if (params.filter) {
+      pairs.push('$filter=' + params.filter);
+    }
+    if (params.select.length > 0) {
+      pairs.push('$select=' + params.select.join(','));
+    }
+    if (params.orderby) {
+      pairs.push('$orderby=' + params.orderby);
+    }
+    if (params.skip !== null) {
+      pairs.push('$skip=' + params.skip);
+    }
+    if (params.top !== null) {
+      pairs.push('$top=' + params.top);
+    }
+    if (params.count) {
+      pairs.push('$count=true');
+    }
+    return pairs.join('&');
+  }
+
+  /**
+   * Refresh the "Graph equivalent" toggle + panel: translate the current
+   * query into OData query options (GEJQ.toGraphQuery), merge them into
+   * the selected response's request URL, and show what runs server-side
+   * vs. the highlighted residual that must stay client-side.
+   */
+  function renderGraphEquivalent() {
+    if (!ui || !ui.graphEqToggle) {
+      return;
+    }
+    var translation = GEJQ.toGraphQuery(state.settings.queryLanguage, state.query.trim());
+    ui.graphEqToggle.disabled = !translation.ok && !state.graphEqOpen;
+    ui.graphEqToggle.title = translation.ok
+      ? 'Show the Microsoft Graph (OData) equivalent of this query — the part that can run server-side'
+      : translation.reason;
+    ui.graphEqToggle.setAttribute('aria-label', ui.graphEqToggle.title);
+    if (!state.graphEqOpen) {
+      return;
+    }
+    var box = ui.graphEqRow;
+    clearChildren(box);
+    if (!translation.ok) {
+      box.appendChild(el('div', 'gejq-grapheq-reason', translation.reason));
+      return;
+    }
+    var response = selectedResponse();
+    var urlInfo = response ? GEJQ.graphQueryUrl(response.url, translation.params) : null;
+    var serverLine = urlInfo ? 'GET ' + urlInfo.url : graphParamsText(translation.params);
+
+    var serverRow = el('div', 'gejq-grapheq-line');
+    serverRow.appendChild(el('span', 'gejq-grapheq-label', 'Server ▸'));
+    var serverText = el('input', 'gejq-grapheq-text');
+    serverText.type = 'text';
+    serverText.readOnly = true;
+    serverText.value = serverLine;
+    serverText.title = serverLine;
+    serverRow.appendChild(serverText);
+    serverRow.appendChild(
+      button('gejq-icon-mini', '📋', 'Copy the Graph request', function (event) {
+        copyText(serverLine, event.currentTarget, '✓');
+      })
+    );
+    if (urlInfo) {
+      serverRow.appendChild(
+        button('gejq-chip gejq-load', 'Load ↗', 'Put this request into Graph Explorer’s URI field — in place, no reload', function () {
+          populateGraphExplorer('GET', urlInfo.url, [], '');
+        })
+      );
+    }
+    box.appendChild(serverRow);
+
+    var clientRow = el('div', 'gejq-grapheq-line');
+    clientRow.appendChild(el('span', 'gejq-grapheq-label', 'Client ▸'));
+    if (translation.residual) {
+      clientRow.appendChild(
+        button(
+          'gejq-chip gejq-grapheq-residual',
+          translation.residual,
+          'This part has no server-side equivalent — click to use it as the query against the server request’s response',
+          function () {
+            setQuery(translation.residual);
+          }
+        )
+      );
+      clientRow.appendChild(
+        el(
+          'span',
+          'gejq-grapheq-hint',
+          translation.notes.length > 0
+            ? 'the highlighted parts must stay client-side'
+            : 'run this here against the new response for the same result'
+        )
+      );
+    } else {
+      clientRow.appendChild(el('span', 'gejq-grapheq-hint', 'nothing left to do client-side'));
+    }
+    box.appendChild(clientRow);
+
+    translation.notes
+      .concat(urlInfo ? urlInfo.notes : [])
+      .forEach(function (note) {
+        box.appendChild(el('div', 'gejq-grapheq-note', '• ' + note));
+      });
+    if (translation.advanced) {
+      box.appendChild(
+        el(
+          'div',
+          'gejq-grapheq-note',
+          '• needs ConsistencyLevel: eventual + $count=true — the Advanced queries setting adds these automatically'
+        )
+      );
+    }
+  }
+
+  // ------------------------------------------------- auto-fetch status row
+
+  /** Send a control action to the MAIN-world auto-fetch controller. */
+  function autoFetchControl(action) {
+    try {
+      window.postMessage({ source: 'gejq-autofetch-control', action: action }, window.location.origin);
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  /**
+   * Auto-fetch progress on the meta row (same line as the result
+   * metrics): a pause button leads while pages stream in; paused chains
+   * offer Resume / one-page Step / Stop — including past the configured
+   * limits, which only pause the chain (each Resume grants a new budget).
+   */
+  function renderFetchStatus() {
+    if (!ui) {
+      return;
+    }
+    var box = ui.fetchStatus;
+    clearChildren(box);
+    if (!fetchProgress || fetchProgress.state === 'done') {
+      box.style.display = 'none';
+      return;
+    }
+    box.style.display = '';
+    var metrics =
+      fetchProgress.pages + ' pages · ' + fetchProgress.items + ' items · ' + GEJQ.formatBytes(fetchProgress.size);
+    if (fetchProgress.state === 'running') {
+      box.appendChild(
+        button('gejq-fetch-btn', '⏸', 'Pause auto-fetch after the page currently loading', function () {
+          autoFetchControl('pause');
+        })
+      );
+      box.appendChild(el('span', 'gejq-fetch-text', 'Auto-fetching… ' + metrics));
+      box.appendChild(
+        button('gejq-link-button', 'Stop', 'Stop and keep what was fetched so far', function () {
+          autoFetchControl('stop');
+        })
+      );
+    } else {
+      box.appendChild(
+        button('gejq-fetch-btn', '▶', 'Resume auto-fetching the remaining pages', function () {
+          autoFetchControl('resume');
+        })
+      );
+      box.appendChild(
+        button('gejq-fetch-btn', '+1', 'Fetch one more page, then pause again', function () {
+          autoFetchControl('step');
+        })
+      );
+      box.appendChild(
+        button('gejq-fetch-btn', '■', 'Stop and keep what was fetched so far', function () {
+          autoFetchControl('stop');
+        })
+      );
+      var reason =
+        fetchProgress.reason === 'page-limit'
+          ? ' — page limit reached; Resume or +1 continue past it'
+          : fetchProgress.reason === 'size-limit'
+            ? ' — size limit reached; Resume or +1 continue past it'
+            : '';
+      box.appendChild(el('span', 'gejq-fetch-text', 'Paused at ' + metrics + reason));
+    }
   }
 
   // ------------------------------------------------ populate Graph Explorer
@@ -1207,6 +1464,8 @@
     clearChildren(list);
     autocomplete.result.items.forEach(function (item, index) {
       var row = el('div', 'gejq-ac-item' + (index === autocomplete.activeIndex ? ' gejq-ac-active' : ''));
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', index === autocomplete.activeIndex ? 'true' : 'false');
       row.appendChild(el('span', 'gejq-ac-label', item.label));
       if (item.detail) {
         row.appendChild(el('span', 'gejq-ac-detail', item.detail));
@@ -1356,7 +1615,9 @@
     var methodControl = document.querySelector('[aria-label="HTTP request method option" i]');
     var method = methodControl && methodControl.textContent ? methodControl.textContent.trim().toUpperCase() : 'GET';
     var advanced = GEJQ.applyAdvancedQuery(input.value.trim(), method);
-    if (advanced.addHeader && !/[?&]\$count=/i.test(input.value)) {
+    // addCount (not addHeader) keys the insertion: a `/$count` path segment
+    // needs the header but must not get a `$count=true` parameter added.
+    if (advanced.addCount && !/[?&]\$count=/i.test(input.value)) {
       insertCountIntoEditor(input);
     }
     if (!fromBlur) {
@@ -1625,7 +1886,9 @@
     if (query === '') {
       return;
     }
-    var outcome = currentResult();
+    // Every caller runs runQuery() first — reuse its evaluation instead of
+    // re-running the query (which doubled the cost on large datasets).
+    var outcome = currentOutcome();
     if (outcome.error || outcome.empty) {
       return;
     }
@@ -1681,6 +1944,8 @@
       if (existing) {
         existing.starred = existing.starred || item.starred === true;
         existing.label = existing.label || (typeof item.label === 'string' ? item.label : '');
+        // Entries persisted by old extension versions may predate tags.
+        existing.tags = Array.isArray(existing.tags) ? existing.tags : [];
         tags.forEach(function (tag) {
           if (existing.tags.indexOf(tag) === -1) {
             existing.tags.push(tag);
@@ -2152,7 +2417,7 @@
     var handlers = {
       input: function () {
         state.query = editor.getValue();
-        storageSet(STORAGE_KEY_QUERY, state.query);
+        scheduleQueryStore(); // debounced — no storage write per keystroke
         scheduleRun();
         updateAutocomplete();
       },
@@ -2472,6 +2737,7 @@
     var historyRow = el('div', 'gejq-history-row');
     var liveBadge = el('span', 'gejq-live-badge', '');
     liveBadge.style.display = 'none';
+    liveBadge.setAttribute('aria-live', 'polite');
     historyRow.appendChild(liveBadge);
     var responseText = el('input', 'gejq-response-text');
     responseText.type = 'text';
@@ -2504,6 +2770,15 @@
       runQuery();
     });
     historyRow.appendChild(diffToggle);
+    // In-panel shortcut for the auto-fetch-all-pages setting — the same
+    // stored setting the popup edits, one click away from the data.
+    var autoFetchToggle = button('gejq-icon-mini gejq-autofetch-toggle', '⟳', '', function () {
+      state.settings.autoFetchNextLink = !state.settings.autoFetchNextLink;
+      saveSettings();
+      pushSettingsToPage();
+      applyAutoFetchToggle();
+    });
+    historyRow.appendChild(autoFetchToggle);
     panel.appendChild(historyRow);
 
     // Compare mode: baseline picker (hidden until ⇄ is toggled on).
@@ -2536,10 +2811,25 @@
     var queryEditor = createQueryEditor(shadow);
     var autocompleteList = el('div', 'gejq-autocomplete');
     autocompleteList.style.display = 'none';
+    autocompleteList.setAttribute('role', 'listbox');
     queryWrap.appendChild(queryEditor.node);
     queryWrap.appendChild(autocompleteList);
     queryRow.appendChild(queryWrap);
+    var graphEqToggle = button('gejq-icon-mini gejq-grapheq-toggle', '⇗', 'Show the Microsoft Graph (OData) equivalent of this query', function () {
+      state.graphEqOpen = !state.graphEqOpen;
+      graphEqToggle.classList.toggle('gejq-tag-active', state.graphEqOpen);
+      graphEqToggle.setAttribute('aria-pressed', state.graphEqOpen ? 'true' : 'false');
+      ui.graphEqRow.style.display = state.graphEqOpen ? '' : 'none';
+      renderGraphEquivalent();
+    });
+    graphEqToggle.setAttribute('aria-pressed', 'false');
+    queryRow.appendChild(graphEqToggle);
     panel.appendChild(queryRow);
+
+    // Graph (OData) equivalent of the current query (hidden until ⇗).
+    var graphEqRow = el('div', 'gejq-grapheq');
+    graphEqRow.style.display = 'none';
+    panel.appendChild(graphEqRow);
 
     var error = el('div', 'gejq-error');
     panel.appendChild(error);
@@ -2548,8 +2838,13 @@
     panel.appendChild(warning);
 
     var metaRow = el('div', 'gejq-meta-row');
+    // Auto-fetch progress + pause/resume/step controls share the metrics
+    // line (hidden while no chain is active).
+    var fetchStatus = el('div', 'gejq-fetch-status');
+    fetchStatus.style.display = 'none';
     var meta = el('div', 'gejq-meta');
     var metaRight = el('div', 'gejq-meta gejq-meta-right');
+    metaRow.appendChild(fetchStatus);
     metaRow.appendChild(meta);
     metaRow.appendChild(metaRight);
     panel.appendChild(metaRow);
@@ -2702,6 +2997,7 @@
     copyFormatSelect.value = state.copyFormat;
     copyFormatSelect.addEventListener('change', function () {
       state.copyFormat = copyFormatSelect.value === 'tsv' ? 'tsv' : 'csv';
+      storageSet(STORAGE_KEY_COPY_FORMAT, state.copyFormat);
     });
     var downloadButton = button('gejq-action', 'Download', 'Download the query result in the selected format', function () {
       var payload = exportPayload();
@@ -2764,11 +3060,15 @@
       historySelect: historySelect,
       liveBadge: liveBadge,
       responseText: responseText,
+      autoFetchToggle: autoFetchToggle,
       queryInput: queryEditor.node,
       queryEditor: queryEditor,
       autocompleteList: autocompleteList,
+      graphEqToggle: graphEqToggle,
+      graphEqRow: graphEqRow,
       error: error,
       warning: warning,
+      fetchStatus: fetchStatus,
       meta: meta,
       metaRight: metaRight,
       diffRow: diffRow,
@@ -2798,6 +3098,7 @@
     updateExportButtons();
     ensurePlacement();
     renderQueryHistory();
+    applyAutoFetchToggle();
     applyLanguage(); // sets placeholder, rebuilds the cheat sheet, runs the query
 
     // Graph Explorer is a React app: the results area comes and goes as
@@ -2874,7 +3175,9 @@
       json: payload.json,
       size: typeof payload.size === 'number' ? payload.size : 0,
       pages: pages,
+      partial: payload.partial === true,
       truncated: payload.truncated === true,
+      stopReason: typeof payload.stopReason === 'string' ? payload.stopReason : '',
       background: background,
       requestHeaders: requestHeaders,
       requestBody: typeof payload.requestBody === 'string' ? payload.requestBody : '',
@@ -2882,38 +3185,13 @@
     });
   });
 
-  /** Live line while auto-fetch walks @odata.nextLink pages. */
+  /** Auto-fetch progress events drive the controls on the metrics row. */
   function handleFetchProgress(payload) {
     if (!ui || !payload) {
       return;
     }
-    if (payload.done === true) {
-      // The aggregated entry (posted right before) re-runs the query and
-      // overwrites the warning row; just drop the progress text.
-      if (ui.warning.getAttribute('data-progress') === '1') {
-        clearChildren(ui.warning);
-        ui.warning.removeAttribute('data-progress');
-      }
-      return;
-    }
-    clearChildren(ui.warning);
-    ui.warning.setAttribute('data-progress', '1');
-    ui.warning.appendChild(
-      el(
-        'span',
-        null,
-        'Auto-fetching pages: ' + payload.pages + ' fetched, ' + payload.items + ' items (' + GEJQ.formatBytes(payload.size) + ')… '
-      )
-    );
-    ui.warning.appendChild(
-      button('gejq-link-button', 'Cancel', 'Stop after the current page and keep what was fetched', function () {
-        try {
-          window.postMessage({ source: 'gejq-cancel-autofetch' }, window.location.origin);
-        } catch (e) {
-          /* ignore */
-        }
-      })
-    );
+    fetchProgress = payload.state === 'done' ? null : payload;
+    renderFetchStatus();
   }
 
   function init() {
@@ -2926,12 +3204,13 @@
       })
       .then(function (css) {
         storageGet(
-          [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FORMAT, STORAGE_KEY_SPLIT, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
+          [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FORMAT, STORAGE_KEY_COPY_FORMAT, STORAGE_KEY_SPLIT, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
           function (items) {
             state.collapsedPref = items[STORAGE_KEY_COLLAPSED] === true;
             state.format = ['csv', 'tree'].indexOf(items[STORAGE_KEY_FORMAT]) !== -1 ? items[STORAGE_KEY_FORMAT] : 'json';
+            state.copyFormat = items[STORAGE_KEY_COPY_FORMAT] === 'tsv' ? 'tsv' : 'csv';
             state.splitPct = GEJQ.clampInt(items[STORAGE_KEY_SPLIT], 15, 85, 50);
-            state.settings = normalizeSettings(items[STORAGE_KEY_SETTINGS]);
+            state.settings = GEJQ.normalizeSettings(items[STORAGE_KEY_SETTINGS]);
             state.queryHistory = Array.isArray(items[STORAGE_KEY_QUERY_HISTORY])
               ? items[STORAGE_KEY_QUERY_HISTORY]
               : [];
@@ -2968,8 +3247,9 @@
         var previousLanguage = state.settings.queryLanguage;
         var previousShowBackground = state.settings.showBackgroundRequests;
         var previousRichEditor = state.settings.richEditor;
-        state.settings = normalizeSettings(changes[STORAGE_KEY_SETTINGS].newValue);
+        state.settings = GEJQ.normalizeSettings(changes[STORAGE_KEY_SETTINGS].newValue);
         pushSettingsToPage();
+        applyAutoFetchToggle();
         if (ui && state.settings.richEditor !== previousRichEditor) {
           swapQueryEditor();
         }
