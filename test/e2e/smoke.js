@@ -701,6 +701,15 @@ function check(name, ok, extra) {
     runningControls.buttons.join('') === '⏸' && runningControls.links === 0,
     JSON.stringify(runningControls)
   );
+  // Editing the query while pages are in flight must keep working — and
+  // must not wedge the pause control (regression: typing mid-fetch froze
+  // both the editor and the fetch controls).
+  await query.fill('$.value[*].displayName');
+  await page.waitForTimeout(300);
+  check(
+    'query edits evaluate while pages are in flight',
+    (await page.locator('.gejq-result').innerText()).includes('Adele Vance')
+  );
   await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     Array.from(shadow.querySelectorAll('.gejq-fetch-status .gejq-fetch-btn'))
