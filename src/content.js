@@ -104,6 +104,7 @@
     historyFilter: { text: '', sinceMs: 0, tags: [] }, // panel-session only
     lastOutcome: null, // result of the last runQuery evaluation (avoids re-running)
     lastOutcomeKey: '', // (response, language, query) the evaluation belongs to
+    lastOutcomeResponse: null, // the response object itself (in-place updates invalidate)
     graphEqOpen: false // Graph (OData) equivalent panel visibility
   };
 
@@ -113,9 +114,17 @@
   var queryStoreTimer = null; // debounces per-keystroke query persistence
   var manualCounter = 0;
   var lastRunInteraction = 0; // when the user last ran a query in Graph Explorer
+  var lastRunDurationMs = 0; // how long the last scheduled evaluation took
   var autocomplete = { open: false, result: null, activeIndex: 0 }; // query-input completion state
   var fetchProgress = null; // latest auto-fetch progress payload (null = idle)
   var suggestionsCache = { key: '', json: undefined }; // skips redundant re-renders
+  var limitedCache = { value: null, limited: null }; // serialized preview per result
+
+  // Counting a result's exact size walks all of it — but a query can
+  // reference the same subtree many times, so serialization can blow up
+  // combinatorially. Past this ceiling the size shows as "≥ …" instead
+  // of the walk hanging the tab.
+  var RENDER_SIZE_CEILING = 256 * 1024 * 1024;
 
   // ---------------------------------------------------------------- storage
 
@@ -406,27 +415,27 @@
       output.appendChild(el('div', 'gejq-empty', 'The query returned no result (undefined).'));
       return { mode: 'json', size: 0 };
     }
-    var limited = GEJQ.stringifyLimited(value, RENDER_LIMIT);
+    var limited = limitedStringify(value);
     var text = typeof limited.text === 'string' ? limited.text : String(value);
     var size = limited.length;
     if (state.format === 'csv' && GEJQ.csvEligible(value)) {
       renderTable(output, value);
-      return { mode: 'csv', size: size };
+      return { mode: 'csv', size: size, overflow: limited.overflow };
     }
     if (state.format === 'tree') {
       renderTree(output, value);
-      return { mode: 'tree', size: size };
+      return { mode: 'tree', size: size, overflow: limited.overflow };
     }
     if (limited.truncated) {
       output.appendChild(
         el(
           'div',
           'gejq-notice',
-          'Result is large (' + GEJQ.formatBytes(size) + '). Showing the first ' + GEJQ.formatBytes(text.length) + ' — use Copy or Download for the full result.'
+          'Result is large (' + (limited.overflow ? '≥ ' : '') + GEJQ.formatBytes(size) + '). Showing the first ' + GEJQ.formatBytes(text.length) + ' — use Copy or Download for the full result.'
         )
       );
       output.appendChild(el('pre', 'gejq-json', text + '\n…'));
-      return { mode: 'json', size: size };
+      return { mode: 'json', size: size, overflow: limited.overflow };
     }
     var pre = el('pre', 'gejq-json');
     if (text.length > HIGHLIGHT_LIMIT) {
@@ -516,15 +525,28 @@
   }
 
   /**
-   * The last runQuery evaluation when still current, else a fresh one —
-   * so Copy/Download/recordQuery never re-run the query on big datasets
-   * just to read the value runQuery already computed.
+   * The last evaluation when still current, else a fresh one — so
+   * repeated runs (Enter after the debounced run, Copy/Download,
+   * recordQuery) never re-run the query on big datasets just to read the
+   * value that was already computed. The response is compared by
+   * reference too: an auto-fetch chain updates its entry in place under
+   * the same id, and that must invalidate the cache.
    */
   function currentOutcome() {
-    if (state.lastOutcome && state.lastOutcomeKey === outcomeKey()) {
+    if (state.lastOutcome && state.lastOutcomeKey === outcomeKey() && state.lastOutcomeResponse === selectedResponse()) {
       return state.lastOutcome;
     }
     return currentResult();
+  }
+
+  /** stringifyLimited with a one-slot cache keyed on the result object. */
+  function limitedStringify(value) {
+    if (limitedCache.value === value && limitedCache.limited) {
+      return limitedCache.limited;
+    }
+    var limited = GEJQ.stringifyLimited(value, RENDER_LIMIT, RENDER_SIZE_CEILING);
+    limitedCache = { value: value, limited: limited };
+    return limited;
   }
 
   /**
@@ -637,9 +659,10 @@
     // a language switch left an incompatible query in the box).
     renderSuggestions(response.json);
 
-    var outcome = currentResult();
+    var outcome = currentOutcome(); // cached when nothing changed since the last run
     state.lastOutcome = outcome; // reused by recordQuery/exportPayload — no re-evaluation
     state.lastOutcomeKey = outcomeKey();
+    state.lastOutcomeResponse = response;
     if (outcome.error) {
       ui.error.textContent = outcome.error;
       updateExportButtons(outcome);
@@ -664,7 +687,7 @@
     // dataset was fetched sits on the left (updateAutoFetchedMeta).
     ui.metaRight.textContent =
       GEJQ.describeResult(outcome.value) +
-      (rendered.size > 0 ? ' · ' + GEJQ.formatBytes(rendered.size) : '') +
+      (rendered.size > 0 ? ' · ' + (rendered.overflow ? '≥ ' : '') + GEJQ.formatBytes(rendered.size) : '') +
       (rendered.mode === 'csv' ? ' · table view' : rendered.mode === 'tree' ? ' · tree view' : '');
     updateExportButtons(outcome);
     renderGraphEquivalent();
@@ -719,11 +742,24 @@
     state.diffText = lines.join('\n');
   }
 
+  /**
+   * Debounced query run with adaptive pacing: the heavier the last
+   * evaluation was, the longer the gap before the next one, so typing
+   * against a large auto-fetched dataset can never saturate the event
+   * loop — clicks (Pause!) and keystrokes always find idle time between
+   * evaluations.
+   */
   function scheduleRun() {
     if (runTimer) {
       clearTimeout(runTimer);
     }
-    runTimer = setTimeout(runQuery, 180);
+    var delay = Math.max(180, Math.min(3000, lastRunDurationMs * 4));
+    runTimer = setTimeout(function () {
+      runTimer = null;
+      var start = Date.now();
+      runQuery();
+      lastRunDurationMs = Date.now() - start;
+    }, delay);
   }
 
   function scheduleQueryStore() {
@@ -1077,7 +1113,7 @@
       manual: true,
       timestamp: Date.now(),
       json: outcome.value,
-      size: GEJQ.stringifyLimited(outcome.value, RENDER_LIMIT).length
+      size: limitedStringify(outcome.value).length
     });
     state.selectedId = id;
     refreshHistorySelect();
@@ -1115,9 +1151,11 @@
           pulseFab();
         }
         // Re-run for updates to the shown entry too (stepping through
-        // pages while pinned to the growing dataset).
+        // pages while pinned to the growing dataset). Scheduled, not
+        // immediate: a multi-MB partial dataset arriving mid-typing must
+        // not evaluate synchronously inside the message handler.
         if (state.open && (state.followLatest || state.selectedId === entry.id)) {
-          runQuery();
+          scheduleRun();
         }
       }
     }

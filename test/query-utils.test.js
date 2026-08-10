@@ -1123,3 +1123,21 @@ test('graphQueryUrl merges params into the source request URL', () => {
 
   assert.equal(GEJQ.graphQueryUrl('pasted JSON #1', { filter: null, select: [], orderby: null, top: null, skip: null, count: false }), null);
 });
+
+test('stringifyLimited bails out at the counting ceiling instead of hanging', () => {
+  // Shared references blow serialized size up combinatorially (2^30 × 1 KB
+  // here) — the walk must stop at the ceiling, not run to completion.
+  let node = { leaf: 'x'.repeat(1024) };
+  for (let i = 0; i < 30; i++) {
+    node = { a: node, b: node };
+  }
+  const limited = GEJQ.stringifyLimited(node, 1000, 100000);
+  assert.equal(limited.truncated, true);
+  assert.equal(limited.overflow, true);
+  assert.ok(limited.length > 100000);
+  assert.ok(limited.text.length <= 1100, String(limited.text.length));
+  // Without a ceiling the same walk reports exact sizes and no overflow.
+  const exact = GEJQ.stringifyLimited({ a: [1, 2, 3] }, 10, 100000);
+  assert.equal(exact.overflow, false);
+  assert.equal(exact.length, JSON.stringify({ a: [1, 2, 3] }, null, 2).length);
+});

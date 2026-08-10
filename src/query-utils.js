@@ -90,16 +90,23 @@
    * once `maxChars` is exceeded the string stops being built (so a huge
    * query result never materializes as one multi-megabyte string — that
    * froze the tab), but the walk continues counting, so `length` is
-   * always the exact size of the full serialization. The emitted prefix
-   * is byte-identical to what JSON.stringify would produce. Only
-   * operates on JSON-shaped data (anything parsed from JSON is safe; no
-   * cycle guard). Returns { text, truncated, length }.
+   * the exact size of the full serialization. `maxCount` is a sanity
+   * ceiling on the counting itself: query results can reference the same
+   * subtree many times, blowing serialized size up combinatorially, and
+   * the walk must bail out (`overflow: true`, `length` = lower bound)
+   * rather than hang. The emitted prefix is byte-identical to what
+   * JSON.stringify would produce. Only operates on JSON-shaped data
+   * (anything parsed from JSON is safe; no cycle guard). Returns
+   * { text, truncated, length, overflow }.
    */
-  function stringifyLimited(value, maxChars) {
+  function stringifyLimited(value, maxChars, maxCount) {
     var limit = typeof maxChars === 'number' && maxChars > 0 ? maxChars : Infinity;
+    var countLimit = typeof maxCount === 'number' && maxCount > 0 ? maxCount : Infinity;
+    var STOP = {};
     var parts = [];
     var size = 0;
     var truncated = false;
+    var overflow = false;
 
     function push(text) {
       size += text.length;
@@ -108,6 +115,11 @@
         if (size > limit) {
           truncated = true; // stop building — keep counting
         }
+      }
+      if (size > countLimit) {
+        truncated = true;
+        overflow = true; // stop counting too — the size is now a lower bound
+        throw STOP;
       }
     }
 
@@ -170,10 +182,16 @@
     }
 
     if (value === undefined || skipped(value)) {
-      return { text: undefined, truncated: false, length: 0 };
+      return { text: undefined, truncated: false, length: 0, overflow: false };
     }
-    walk(value, '');
-    return { text: parts.join(''), truncated: truncated, length: size };
+    try {
+      walk(value, '');
+    } catch (e) {
+      if (e !== STOP) {
+        throw e;
+      }
+    }
+    return { text: parts.join(''), truncated: truncated, length: size, overflow: overflow };
   }
 
   /** Compact display form of a Graph URL: path + query, origin stripped. */
