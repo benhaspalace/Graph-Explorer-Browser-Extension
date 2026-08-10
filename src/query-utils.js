@@ -86,28 +86,28 @@
   }
 
   /**
-   * JSON.stringify(value, null, 2) with a character budget: serialization
-   * stops as soon as `maxChars` is exceeded, so rendering a preview of a
-   * huge query result never builds the full multi-megabyte string (which
-   * froze the tab on large auto-fetched datasets). The emitted prefix is
-   * byte-identical to what JSON.stringify would produce. Only operates on
-   * JSON-shaped data (anything parsed from JSON is safe; no cycle guard).
-   * Returns { text, truncated, length } — when truncated, `length` is the
-   * length of the emitted prefix, a lower bound on the full size.
+   * JSON.stringify(value, null, 2) with a character budget for the TEXT:
+   * once `maxChars` is exceeded the string stops being built (so a huge
+   * query result never materializes as one multi-megabyte string — that
+   * froze the tab), but the walk continues counting, so `length` is
+   * always the exact size of the full serialization. The emitted prefix
+   * is byte-identical to what JSON.stringify would produce. Only
+   * operates on JSON-shaped data (anything parsed from JSON is safe; no
+   * cycle guard). Returns { text, truncated, length }.
    */
   function stringifyLimited(value, maxChars) {
     var limit = typeof maxChars === 'number' && maxChars > 0 ? maxChars : Infinity;
-    var LIMIT = {};
     var parts = [];
     var size = 0;
     var truncated = false;
 
     function push(text) {
-      parts.push(text);
       size += text.length;
-      if (size > limit) {
-        truncated = true;
-        throw LIMIT;
+      if (!truncated) {
+        parts.push(text);
+        if (size > limit) {
+          truncated = true; // stop building — keep counting
+        }
       }
     }
 
@@ -172,13 +172,7 @@
     if (value === undefined || skipped(value)) {
       return { text: undefined, truncated: false, length: 0 };
     }
-    try {
-      walk(value, '');
-    } catch (e) {
-      if (e !== LIMIT) {
-        throw e;
-      }
-    }
+    walk(value, '');
     return { text: parts.join(''), truncated: truncated, length: size };
   }
 

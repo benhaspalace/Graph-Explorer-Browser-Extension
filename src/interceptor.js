@@ -62,6 +62,7 @@
           finalizeChain(activeFetch, activeFetch.nextUrl, 'stopped');
         } else {
           activeFetch.stopRequested = true;
+          abortInFlight(activeFetch);
         }
       }
     }
@@ -169,15 +170,17 @@
    * entry. The entry id stays stable across posts, so later posts update
    * the same entry in place instead of adding new ones.
    *
-   * The chain is interactive: the panel pauses, resumes, steps (one page
-   * at a time), or stops it via gejq-autofetch-control messages. The
+   * The chain is interactive: the panel pauses, resumes, or steps it
+   * (one page at a time) via gejq-autofetch-control messages. The
    * configured page/size limits are checkpoints, not hard stops — when
    * one is reached the chain pauses, and Resume/Step continue past it
-   * (each resume grants another full page/size budget). A chain only
-   * finishes when the links run out, the user stops it, or a page fetch
-   * fails; incomplete datasets are flagged `truncated` with a
-   * `stopReason` ('stopped' | 'error') so the panel can say honestly why
-   * — a user stop is never reported as a limit.
+   * (each resume grants another full page/size budget). There is no
+   * explicit stop: a paused chain simply stays paused until a newer
+   * query supersedes it or the setting is turned off, both of which
+   * close it out. A chain only finishes when the links run out, it is
+   * closed out like that, or a page fetch fails; incomplete datasets are
+   * flagged `truncated` with a `stopReason` ('stopped' | 'error') so the
+   * panel can say honestly why — never blamed on a limit.
    */
   var activeFetch = null;
 
@@ -286,24 +289,52 @@
       return;
     }
     postProgress(chain, 'running');
-    originalFetch(nextUrl, { headers: chain.headers })
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    chain.abortController = controller;
+
+    /**
+     * In-flight failure/abort router: user intent (stop, pause) wins over
+     * reporting an error. Pause aborts the page fetch so it takes effect
+     * immediately — the aborted page's URL is kept and simply re-fetched
+     * on resume.
+     */
+    function pageFailed() {
+      chain.abortController = null;
+      if (chain.state === 'done') {
+        return;
+      }
+      if (chain.stopRequested) {
+        finalizeChain(chain, nextUrl, 'stopped');
+        return;
+      }
+      if (chain.pauseRequested) {
+        chain.pauseRequested = false;
+        chain.nextUrl = nextUrl;
+        pauseChain(chain, 'user');
+        return;
+      }
+      finalizeChain(chain, nextUrl, 'error');
+    }
+
+    originalFetch(nextUrl, controller ? { headers: chain.headers, signal: controller.signal } : { headers: chain.headers })
       .then(function (response) {
         if (!response.ok) {
-          finalizeChain(chain, nextUrl, 'error');
+          pageFailed();
           return;
         }
         response
           .text()
           .then(function (text) {
+            chain.abortController = null;
             var pageJson;
             try {
               pageJson = JSON.parse(text);
             } catch (e) {
-              finalizeChain(chain, nextUrl, 'error');
+              pageFailed();
               return;
             }
             if (!pageJson || !Array.isArray(pageJson.value)) {
-              finalizeChain(chain, nextUrl, 'error');
+              pageFailed();
               return;
             }
             chain.totalSize += text.length;
@@ -327,13 +358,20 @@
               continueChain(chain);
             }
           })
-          .catch(function () {
-            finalizeChain(chain, nextUrl, 'error');
-          });
+          .catch(pageFailed);
       })
-      .catch(function () {
-        finalizeChain(chain, nextUrl, 'error');
-      });
+      .catch(pageFailed);
+  }
+
+  /** Abort the page fetch currently in flight (pause/stop act instantly). */
+  function abortInFlight(chain) {
+    if (chain.abortController) {
+      try {
+        chain.abortController.abort();
+      } catch (e) {
+        /* ignore */
+      }
+    }
   }
 
   function handleAutoFetchControl(action) {
@@ -342,7 +380,8 @@
       return;
     }
     if (action === 'pause' && chain.state === 'running') {
-      chain.pauseRequested = true; // takes effect after the in-flight page
+      chain.pauseRequested = true;
+      abortInFlight(chain); // pause NOW — the aborted page is retried on resume
     } else if (action === 'resume' && chain.state === 'paused' && chain.nextUrl) {
       // Each resume grants a fresh budget, so a chain paused at a limit
       // can keep going as far as the user wants.
@@ -356,12 +395,6 @@
       chain.sizeBudget = Math.max(chain.sizeBudget, chain.totalSize + settings.autoFetchMaxChars);
       chain.state = 'running';
       continueChain(chain);
-    } else if (action === 'stop') {
-      if (chain.state === 'paused') {
-        finalizeChain(chain, chain.nextUrl, 'stopped');
-      } else {
-        chain.stopRequested = true;
-      }
     }
   }
 

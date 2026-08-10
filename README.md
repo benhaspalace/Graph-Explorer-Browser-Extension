@@ -68,16 +68,18 @@ status for this branch.
   may ask you to allow the sign-in popup).
 - **Auto-fetch all pages** *(on by default)* — follow the `@odata.nextLink`
   chain and add the combined dataset to the response list, so you can query
-  the entire result set at once. While pages stream in, the metrics row
-  shows live progress (pages · items · size) with a leading **⏸ Pause**
-  button and a **Stop** link; paused chains offer **▶ Resume**, **+1**
-  (fetch one page, then pause again), and **■ Stop**. The configured
-  page-count and data-size limits (defaults: 50 pages / 10 MB) are
-  checkpoints, not hard stops: reaching one pauses the chain, and Resume
-  or +1 continue past it — each Resume grants a fresh budget. The growing
-  dataset is queryable at every pause, the response line shows how many
-  pages it holds ("auto-fetched · N pages"), and a stopped or failed chain
-  is labeled honestly ("stopped" / "error" — never blamed on a limit). The
+  the entire result set at once. While pages stream in, the left of the
+  metrics row shows live progress (pages · items · size) behind a leading
+  **⏸ Pause** button — pausing is instant (the page in flight is aborted
+  and simply retried on resume). A paused chain offers **▶ Resume** and
+  **+1** (fetch one page, then pause again); there is no stop button — a
+  chain you never resume just stays paused with everything fetched so far
+  queryable, and running a new query (or turning ⟳ off) closes it out.
+  The configured page-count and data-size limits (defaults: 50 pages /
+  10 MB) are checkpoints, not hard stops: reaching one pauses the chain,
+  and Resume or +1 continue past it — each Resume grants a fresh budget.
+  Once a chain ends, the same spot reads "auto-fetched · N pages", with
+  "(incomplete)" when it was closed out early or a page failed. The
   extension replays the original request's own headers for the follow-up
   pages; nothing is stored. Toggle the feature from the ⟳ button next to
   the response list or in the settings.
