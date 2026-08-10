@@ -926,14 +926,17 @@ test('stringifyLimited matches JSON.stringify when under the limit', () => {
   }
 });
 
-test('stringifyLimited stops early and reports a lower-bound length', () => {
+test('stringifyLimited caps the text but reports the exact full size', () => {
   const big = { value: Array.from({ length: 1000 }, (unused, i) => ({ id: i, name: 'user ' + i })) };
+  const full = JSON.stringify(big, null, 2);
   const limited = GEJQ.stringifyLimited(big, 500);
   assert.equal(limited.truncated, true);
   assert.ok(limited.text.length <= 550, String(limited.text.length));
-  assert.ok(limited.length >= 500);
+  // Counting continues past the text budget: the size is exact, not a
+  // lower bound stuck at the render cap.
+  assert.equal(limited.length, full.length);
   // The emitted prefix is byte-identical to the full serialization.
-  assert.ok(JSON.stringify(big, null, 2).startsWith(limited.text));
+  assert.ok(full.startsWith(limited.text));
 });
 
 test('trimResponses caps manual and live entries separately', () => {

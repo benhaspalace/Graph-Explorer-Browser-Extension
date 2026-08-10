@@ -174,7 +174,7 @@ function check(name, ok, extra) {
 
   const graphRequests = [];
   let extOrigin = null;
-  await page.route('**/*', (route) => {
+  await page.route('**/*', async (route) => {
     const url = route.request().url();
     if (url.startsWith('https://developer.microsoft.com/en-us/graph/graph-explorer')) {
       return route.fulfill({ contentType: 'text/html', body: FIXTURE_HTML });
@@ -182,7 +182,20 @@ function check(name, ok, extra) {
     if (url.startsWith('https://graph.microsoft.com/')) {
       graphRequests.push({ url, headers: route.request().headers() });
       let body = SAMPLE_RESPONSE;
-      if (url.includes('paged=1')) {
+      if (url.includes('pagedslow=1')) {
+        body = Object.assign({}, SAMPLE_RESPONSE, {
+          '@odata.nextLink': 'https://graph.microsoft.com/v1.0/users?pagedslow=2'
+        });
+      } else if (url.includes('pagedslow=2')) {
+        // Slow page: gives the pause test a window while the fetch is in
+        // flight (pause must abort it, not wait for it).
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        body = Object.assign({}, PAGE_TWO, {
+          '@odata.nextLink': 'https://graph.microsoft.com/v1.0/users?pagedslow=3'
+        });
+      } else if (url.includes('pagedslow=3')) {
+        body = PAGE_THREE;
+      } else if (url.includes('paged=1')) {
         body = Object.assign({}, SAMPLE_RESPONSE, {
           '@odata.nextLink': 'https://graph.microsoft.com/v1.0/users?paged=2'
         });
@@ -191,10 +204,14 @@ function check(name, ok, extra) {
       } else if (url.includes('paged=3')) {
         body = PAGE_THREE;
       }
-      return route.fulfill({
-        contentType: 'application/json;odata.metadata=minimal',
-        body: JSON.stringify(body)
-      });
+      try {
+        return await route.fulfill({
+          contentType: 'application/json;odata.metadata=minimal',
+          body: JSON.stringify(body)
+        });
+      } catch (e) {
+        return; // request aborted client-side (the pause test does this)
+      }
     }
     if (url.startsWith('chrome-extension://')) {
       return route.fallback(); // extension resources load normally
@@ -659,6 +676,76 @@ function check(name, ok, extra) {
     (await page.evaluate(() => document.getElementById('ge-method').textContent.trim())) === 'GET'
   );
 
+  // 10b2. Pausing a RUNNING chain is instant (the in-flight page fetch is
+  // aborted and retried on resume), the controls survive streaming
+  // progress events, and there is no redundant stop link while running —
+  // pause first, then decide (▶ / +1 / ■).
+  await page.evaluate(() => window.runGraphQuery('/v1.0/users?pagedslow=1'));
+  await page.waitForFunction(
+    () => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const box = shadow.querySelector('.gejq-fetch-status');
+      return box && box.style.display !== 'none' && box.textContent.includes('Auto-fetching');
+    },
+    { timeout: 10000 }
+  );
+  const runningControls = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      buttons: Array.from(shadow.querySelectorAll('.gejq-fetch-status .gejq-fetch-btn')).map((b) => b.textContent),
+      links: shadow.querySelectorAll('.gejq-fetch-status .gejq-link-button').length
+    };
+  });
+  check(
+    'running chain shows only the pause control (no stop link)',
+    runningControls.buttons.join('') === '⏸' && runningControls.links === 0,
+    JSON.stringify(runningControls)
+  );
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    Array.from(shadow.querySelectorAll('.gejq-fetch-status .gejq-fetch-btn'))
+      .find((b) => b.textContent === '⏸')
+      .click();
+  });
+  try {
+    // The in-flight page takes 1500ms — 'Paused' must appear well before
+    // that, proving the pause aborted it instead of waiting for it.
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        return shadow.querySelector('.gejq-fetch-status').textContent.includes('Paused');
+      },
+      { timeout: 1200 }
+    );
+    check('pause takes effect immediately (in-flight page aborted)', true);
+  } catch (e) {
+    check('pause takes effect immediately (in-flight page aborted)', false, await page.evaluate(
+      () => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-fetch-status').textContent
+    ));
+  }
+  // Resume re-fetches the aborted page and completes all three pages.
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    Array.from(shadow.querySelectorAll('.gejq-fetch-status .gejq-fetch-btn'))
+      .find((b) => b.textContent === '▶')
+      .click();
+  });
+  try {
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        const options = Array.from(shadow.querySelectorAll('.gejq-history-select option'));
+        return options.some(
+          (o) => o.textContent.includes('pagedslow=1') && o.textContent.includes('3 pages') && !o.textContent.includes('incomplete')
+        );
+      },
+      { timeout: 10000 }
+    );
+    check('resume after pause re-fetches the aborted page and completes', true);
+  } catch (e) {
+    check('resume after pause re-fetches the aborted page and completes', false, e.message.split('\n')[0]);
+  }
+
   // 10c. Reaching the auto-fetch page limit PAUSES the chain (with resume/
   // step/stop controls on the metrics row) instead of ending it.
   await popup.fill('#setting-auto-fetch-pages', '2');
@@ -729,14 +816,13 @@ function check(name, ok, extra) {
   await query.fill('$.value.length');
   await page.waitForTimeout(400);
   check('stepped dataset holds all 9 items', (await page.locator('.gejq-result').innerText()).trim().includes('9'));
-  check(
-    'metrics row says the result was auto-fetched',
-    (await page.locator('.gejq-meta-right').innerText()).includes('auto-fetched'),
-    await page.locator('.gejq-meta-right').innerText()
-  );
+  const metaLeftDone = await page.locator('.gejq-meta').first().innerText();
+  check('left metrics slot says the result was auto-fetched', metaLeftDone.includes('auto-fetched · 3 pages'), metaLeftDone);
 
-  // 10c2. Stopping a paused chain keeps what was fetched and says WHY the
-  // dataset is incomplete — a user stop, never a configured limit.
+  // 10c2. There is no stop button: a paused chain the user never resumes
+  // simply stays paused, and turning auto-fetch off (⟳) — or running a new
+  // query — closes it out. The kept dataset is labeled "(incomplete)" in
+  // the metrics row (no separate warning line), never blaming a limit.
   await page.evaluate(() => window.runGraphQuery('/v1.0/users?paged=1'));
   await page.waitForFunction(
     () => {
@@ -746,7 +832,12 @@ function check(name, ok, extra) {
     },
     { timeout: 10000 }
   );
-  check('stop button present while paused', await fetchControl('■'));
+  const pausedControls = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return Array.from(shadow.querySelectorAll('.gejq-fetch-status .gejq-fetch-btn')).map((b) => b.textContent);
+  });
+  check('paused chain offers only resume and step', pausedControls.join('') === '▶+1', pausedControls.join(' '));
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autofetch-toggle').click());
   try {
     await page.waitForFunction(
       () => {
@@ -756,15 +847,23 @@ function check(name, ok, extra) {
       },
       { timeout: 10000 }
     );
-    check('stopped chain marks the entry incomplete', true);
+    check('closing out a paused chain (⟳ off) marks the entry incomplete', true);
   } catch (e) {
-    check('stopped chain marks the entry incomplete', false, e.message.split('\n')[0]);
+    check('closing out a paused chain (⟳ off) marks the entry incomplete', false, e.message.split('\n')[0]);
   }
   await query.fill('$.value.length');
   await page.waitForTimeout(400);
-  const warningText = await page.locator('.gejq-warning').innerText();
-  check('warning says the fetch was stopped', /stopped/i.test(warningText), warningText.slice(0, 90));
-  check('warning does not blame a configured limit', !/limit/i.test(warningText), warningText.slice(0, 90));
+  const metaLeftStopped = await page.locator('.gejq-meta').first().innerText();
+  check(
+    'metrics row labels the kept dataset incomplete',
+    metaLeftStopped.includes('auto-fetched · 2 pages (incomplete)'),
+    metaLeftStopped
+  );
+  check('no redundant warning line for incomplete datasets', (await page.locator('.gejq-warning').innerText()).trim() === '');
+  check('incomplete label does not blame a configured limit', !/limit/i.test(metaLeftStopped), metaLeftStopped);
+  // Auto-fetch back on for the rest of the run.
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autofetch-toggle').click());
+  await page.waitForTimeout(400);
 
   // 10d. Switching languages auto-converts simple queries.
   await query.fill('$.value[*].displayName');

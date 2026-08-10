@@ -393,8 +393,8 @@
   /**
    * Render the query result: sortable table in CSV mode (when the result
    * is CSV-able), interactive tree in Tree mode, otherwise pretty JSON.
-   * Returns { mode, size, sizeIsLowerBound } — size is the serialized
-   * length. Serialization is capped at RENDER_LIMIT characters
+   * Returns { mode, size } — size is the exact serialized length. The
+   * rendered TEXT is capped at RENDER_LIMIT characters
    * (GEJQ.stringifyLimited), so huge auto-fetched datasets never build a
    * full multi-megabyte string on every keystroke — that froze the tab.
    * Copy/Download still serialize the full result on demand.
@@ -404,29 +404,29 @@
     clearChildren(output);
     if (value === undefined) {
       output.appendChild(el('div', 'gejq-empty', 'The query returned no result (undefined).'));
-      return { mode: 'json', size: 0, sizeIsLowerBound: false };
+      return { mode: 'json', size: 0 };
     }
     var limited = GEJQ.stringifyLimited(value, RENDER_LIMIT);
     var text = typeof limited.text === 'string' ? limited.text : String(value);
     var size = limited.length;
     if (state.format === 'csv' && GEJQ.csvEligible(value)) {
       renderTable(output, value);
-      return { mode: 'csv', size: size, sizeIsLowerBound: limited.truncated };
+      return { mode: 'csv', size: size };
     }
     if (state.format === 'tree') {
       renderTree(output, value);
-      return { mode: 'tree', size: size, sizeIsLowerBound: limited.truncated };
+      return { mode: 'tree', size: size };
     }
     if (limited.truncated) {
       output.appendChild(
         el(
           'div',
           'gejq-notice',
-          'Result is large (over ' + GEJQ.formatBytes(RENDER_LIMIT) + ' of JSON). Showing the first part — use Copy or Download for the full result.'
+          'Result is large (' + GEJQ.formatBytes(size) + '). Showing the first ' + GEJQ.formatBytes(text.length) + ' — use Copy or Download for the full result.'
         )
       );
       output.appendChild(el('pre', 'gejq-json', text + '\n…'));
-      return { mode: 'json', size: size, sizeIsLowerBound: true };
+      return { mode: 'json', size: size };
     }
     var pre = el('pre', 'gejq-json');
     if (text.length > HIGHLIGHT_LIMIT) {
@@ -435,7 +435,7 @@
       appendHighlightedJson(pre, text);
     }
     output.appendChild(pre);
-    return { mode: 'json', size: size, sizeIsLowerBound: false };
+    return { mode: 'json', size: size };
   }
 
   // ------------------------------------------------------------ query logic
@@ -563,16 +563,25 @@
   }
 
   /**
-   * Honest description of why an auto-fetched dataset is incomplete:
-   * a user stop and a page error are named as such — never blamed on a
-   * configured limit (limits pause the chain now; they don't end it).
+   * Left side of the metrics row: how the selected dataset was fetched —
+   * "auto-fetched · N pages", "… so far" while its chain is paused, or
+   * "… (incomplete)" when the chain was closed out early or a page
+   * failed. Replaces the old warning line (which said the same thing).
+   * Hidden while the live progress for the same request is showing, so
+   * there is exactly one left-hand indicator at a time.
    */
-  function truncationWarning(response) {
-    var summary = response.pages + ' pages (' + GEJQ.formatBytes(response.size) + ') were fetched — this dataset is incomplete.';
-    if (response.stopReason === 'error') {
-      return '⚠ Auto-fetch hit an error: only ' + summary;
+  function updateAutoFetchedMeta() {
+    if (!ui) {
+      return;
     }
-    return '⚠ Auto-fetch was stopped: only ' + summary;
+    var response = selectedResponse();
+    var text = '';
+    if (response && response.pages >= 2 && !(fetchProgress && fetchProgress.url === response.url)) {
+      text =
+        'auto-fetched · ' + response.pages + ' pages' +
+        (response.partial ? ' so far' : response.truncated ? ' (incomplete)' : '');
+    }
+    ui.meta.textContent = text;
   }
 
   function runQuery() {
@@ -620,7 +629,8 @@
       return;
     }
 
-    setWarning(response.truncated ? truncationWarning(response) : '');
+    setWarning('');
+    updateAutoFetchedMeta();
 
     // Suggestions depend on the response and language, not on the query —
     // refresh them even when the current query errors (e.g. right after
@@ -650,17 +660,12 @@
       return;
     }
     var rendered = renderResult(outcome.value);
-    // Single readout on the right: type · count · size (· view). The count
-    // (items/keys/chars) that used to sit on the left is folded in here, so
-    // there is no redundant second count.
-    ui.meta.textContent = '';
+    // Result readout on the right: type · count · size (· view). How the
+    // dataset was fetched sits on the left (updateAutoFetchedMeta).
     ui.metaRight.textContent =
       GEJQ.describeResult(outcome.value) +
-      (rendered.size > 0 ? ' · ' + (rendered.sizeIsLowerBound ? '≥ ' : '') + GEJQ.formatBytes(rendered.size) : '') +
-      (rendered.mode === 'csv' ? ' · table view' : rendered.mode === 'tree' ? ' · tree view' : '') +
-      (response.pages >= 2
-        ? ' · auto-fetched · ' + response.pages + ' pages' + (response.partial ? ' so far' : response.truncated ? ' (incomplete)' : '')
-        : '');
+      (rendered.size > 0 ? ' · ' + GEJQ.formatBytes(rendered.size) : '') +
+      (rendered.mode === 'csv' ? ' · table view' : rendered.mode === 'tree' ? ' · tree view' : '');
     updateExportButtons(outcome);
     renderGraphEquivalent();
   }
@@ -1300,60 +1305,84 @@
     }
   }
 
+  // What the status box currently shows. The controls are rebuilt ONLY
+  // when the chain's state flips (running ⇄ paused) — progress events
+  // arrive once per page, and rebuilding the buttons on each one
+  // destroyed them between mousedown and mouseup, so clicks on Pause
+  // never landed while pages were streaming in.
+  var fetchStatusView = { state: null, text: null, pausePending: false };
+
   /**
    * Auto-fetch progress on the meta row (same line as the result
-   * metrics): a pause button leads while pages stream in; paused chains
-   * offer Resume / one-page Step / Stop — including past the configured
-   * limits, which only pause the chain (each Resume grants a new budget).
+   * metrics): a pause button leads while pages stream in (pause is
+   * immediate — the in-flight page is aborted and retried on resume);
+   * paused chains offer Resume / one-page Step / Stop — including past
+   * the configured limits, which only pause the chain (each Resume
+   * grants a new budget).
    */
   function renderFetchStatus() {
     if (!ui) {
       return;
     }
     var box = ui.fetchStatus;
-    clearChildren(box);
-    if (!fetchProgress || fetchProgress.state === 'done') {
+    if (!fetchProgress) {
+      clearChildren(box);
       box.style.display = 'none';
+      fetchStatusView.state = null;
+      fetchStatusView.text = null;
+      fetchStatusView.pausePending = false;
       return;
     }
-    box.style.display = '';
+    if (fetchStatusView.state !== fetchProgress.state) {
+      clearChildren(box);
+      fetchStatusView.state = fetchProgress.state;
+      fetchStatusView.pausePending = false;
+      if (fetchProgress.state === 'running') {
+        var pauseButton = button('gejq-fetch-btn', '⏸', 'Pause auto-fetch now — the page in flight is retried on resume', function () {
+          fetchStatusView.pausePending = true; // instant feedback
+          pauseButton.disabled = true;
+          updateFetchStatusText();
+          autoFetchControl('pause');
+        });
+        box.appendChild(pauseButton);
+      } else {
+        // No stop button: a paused chain the user never resumes IS
+        // stopped — what was fetched stays queryable, and a new query or
+        // turning ⟳ off closes the chain out for good.
+        box.appendChild(
+          button('gejq-fetch-btn', '▶', 'Resume auto-fetching the remaining pages', function () {
+            autoFetchControl('resume');
+          })
+        );
+        box.appendChild(
+          button('gejq-fetch-btn', '+1', 'Fetch one more page, then pause again', function () {
+            autoFetchControl('step');
+          })
+        );
+      }
+      fetchStatusView.text = el('span', 'gejq-fetch-text', '');
+      box.appendChild(fetchStatusView.text);
+      box.style.display = '';
+    }
+    updateFetchStatusText();
+  }
+
+  function updateFetchStatusText() {
+    if (!fetchStatusView.text || !fetchProgress) {
+      return;
+    }
     var metrics =
       fetchProgress.pages + ' pages · ' + fetchProgress.items + ' items · ' + GEJQ.formatBytes(fetchProgress.size);
     if (fetchProgress.state === 'running') {
-      box.appendChild(
-        button('gejq-fetch-btn', '⏸', 'Pause auto-fetch after the page currently loading', function () {
-          autoFetchControl('pause');
-        })
-      );
-      box.appendChild(el('span', 'gejq-fetch-text', 'Auto-fetching… ' + metrics));
-      box.appendChild(
-        button('gejq-link-button', 'Stop', 'Stop and keep what was fetched so far', function () {
-          autoFetchControl('stop');
-        })
-      );
+      fetchStatusView.text.textContent = (fetchStatusView.pausePending ? 'Pausing… ' : 'Auto-fetching… ') + metrics;
     } else {
-      box.appendChild(
-        button('gejq-fetch-btn', '▶', 'Resume auto-fetching the remaining pages', function () {
-          autoFetchControl('resume');
-        })
-      );
-      box.appendChild(
-        button('gejq-fetch-btn', '+1', 'Fetch one more page, then pause again', function () {
-          autoFetchControl('step');
-        })
-      );
-      box.appendChild(
-        button('gejq-fetch-btn', '■', 'Stop and keep what was fetched so far', function () {
-          autoFetchControl('stop');
-        })
-      );
       var reason =
         fetchProgress.reason === 'page-limit'
           ? ' — page limit reached; Resume or +1 continue past it'
           : fetchProgress.reason === 'size-limit'
             ? ' — size limit reached; Resume or +1 continue past it'
             : '';
-      box.appendChild(el('span', 'gejq-fetch-text', 'Paused at ' + metrics + reason));
+      fetchStatusView.text.textContent = 'Paused at ' + metrics + reason;
     }
   }
 
@@ -3192,6 +3221,9 @@
     }
     fetchProgress = payload.state === 'done' ? null : payload;
     renderFetchStatus();
+    // The live progress and the "auto-fetched · N pages" label share the
+    // left slot — swap the label in the moment the progress line clears.
+    updateAutoFetchedMeta();
   }
 
   function init() {
