@@ -128,11 +128,22 @@ test('applyAdvancedQuery handles /$count path segments', () => {
   const result = GEJQ.applyAdvancedQuery('https://graph.microsoft.com/v1.0/users/$count', 'GET');
   assert.equal(result.addHeader, true);
   assert.equal(result.url, 'https://graph.microsoft.com/v1.0/users/$count');
+  // The header is needed but the $count=true parameter must NOT be added
+  // to a /$count segment — callers key their insertion off addCount.
+  assert.equal(result.addCount, false);
+});
+
+test('applyAdvancedQuery reports addCount only when it appended $count', () => {
+  const appended = GEJQ.applyAdvancedQuery('https://graph.microsoft.com/v1.0/users?$filter=x', 'GET');
+  assert.equal(appended.addCount, true);
+  const existing = GEJQ.applyAdvancedQuery('https://graph.microsoft.com/v1.0/users?$count=true&$filter=x', 'GET');
+  assert.equal(existing.addHeader, true);
+  assert.equal(existing.addCount, false);
 });
 
 test('applyAdvancedQuery leaves plain and non-GET requests untouched', () => {
   const plain = GEJQ.applyAdvancedQuery('https://graph.microsoft.com/v1.0/me', 'GET');
-  assert.deepEqual(plain, { url: 'https://graph.microsoft.com/v1.0/me', addHeader: false });
+  assert.deepEqual(plain, { url: 'https://graph.microsoft.com/v1.0/me', addHeader: false, addCount: false });
 
   const select = GEJQ.applyAdvancedQuery('https://graph.microsoft.com/v1.0/users?$select=id', 'GET');
   assert.equal(select.addHeader, false);
@@ -143,7 +154,7 @@ test('applyAdvancedQuery leaves plain and non-GET requests untouched', () => {
   assert.ok(!post.url.includes('$count'));
 
   const invalid = GEJQ.applyAdvancedQuery('not a url', 'GET');
-  assert.deepEqual(invalid, { url: 'not a url', addHeader: false });
+  assert.deepEqual(invalid, { url: 'not a url', addHeader: false, addCount: false });
 });
 
 test('applyAdvancedQuery preserves existing query parameters', () => {
@@ -694,7 +705,7 @@ test('classifyBackgroundRequest combines pattern, editor, and run signals', () =
 test('clampInt clamps numbers and numeric strings, falls back otherwise', () => {
   assert.equal(GEJQ.clampInt(5, 1, 10, 3), 5);
   assert.equal(GEJQ.clampInt(99, 1, 10, 3), 10);
-  assert.equal(GEJQ.clampInt(0, 1, 10, 3), 3);
+  assert.equal(GEJQ.clampInt(0, 1, 10, 3), 1); // below-min clamps up instead of falling back
   assert.equal(GEJQ.clampInt(7.9, 1, 10, 3), 7);
   assert.equal(GEJQ.clampInt('42', 1, 100, 3), 42);
   assert.equal(GEJQ.clampInt('nope', 1, 10, 3), 3);
@@ -883,4 +894,229 @@ test('nextQueryToken marks @/$ references as variables', () => {
   ]);
   assert.deepEqual(tokenize('jq', '. as $x | $x')[2], ['$x', 'variableName']);
   assert.deepEqual(tokenize('jmespath', 'value[?contains(@, `1`)]')[5], ['@', 'variableName']);
+});
+
+// --------------------------------------------------------- new helpers
+
+test('clampInt clamps below-min values instead of ignoring them', () => {
+  assert.equal(GEJQ.clampInt(0, 1, 1000, 50), 1);
+  assert.equal(GEJQ.clampInt('-3', 1, 1000, 50), 1);
+  assert.equal(GEJQ.clampInt(2000, 1, 1000, 50), 1000);
+  assert.equal(GEJQ.clampInt('7', 1, 1000, 50), 7);
+  assert.equal(GEJQ.clampInt('abc', 1, 1000, 50), 50);
+  assert.equal(GEJQ.clampInt(undefined, 1, 1000, 50), 50);
+});
+
+test('stringifyLimited matches JSON.stringify when under the limit', () => {
+  const samples = [
+    { a: [1, 'two', null, { b: {}, c: [], d: false }], e: 'x"y\n\\z', f: -1.5 },
+    [],
+    {},
+    [[{ deep: [true, null] }]],
+    'plain string',
+    42,
+    null
+  ];
+  for (const sample of samples) {
+    const expected = JSON.stringify(sample, null, 2);
+    const limited = GEJQ.stringifyLimited(sample, 1000000);
+    assert.equal(limited.text, expected);
+    assert.equal(limited.truncated, false);
+    assert.equal(limited.length, expected.length);
+  }
+});
+
+test('stringifyLimited stops early and reports a lower-bound length', () => {
+  const big = { value: Array.from({ length: 1000 }, (unused, i) => ({ id: i, name: 'user ' + i })) };
+  const limited = GEJQ.stringifyLimited(big, 500);
+  assert.equal(limited.truncated, true);
+  assert.ok(limited.text.length <= 550, String(limited.text.length));
+  assert.ok(limited.length >= 500);
+  // The emitted prefix is byte-identical to the full serialization.
+  assert.ok(JSON.stringify(big, null, 2).startsWith(limited.text));
+});
+
+test('trimResponses caps manual and live entries separately', () => {
+  const list = [
+    { id: 'r1' },
+    { id: 'm1', manual: true },
+    { id: 'r2' },
+    { id: 'r3' },
+    { id: 'm2', manual: true },
+    { id: 'r4' }
+  ];
+  assert.deepEqual(GEJQ.trimResponses(list, 2).map((entry) => entry.id), ['r1', 'm1', 'r2', 'm2']);
+  assert.deepEqual(GEJQ.trimResponses(list, 10).map((entry) => entry.id), ['r1', 'm1', 'r2', 'r3', 'm2', 'r4']);
+  assert.deepEqual(GEJQ.trimResponses(null, 3), []);
+});
+
+test('normalizeSettings fills defaults and validates stored values', () => {
+  assert.deepEqual(GEJQ.normalizeSettings(null), Object.assign({}, GEJQ.DEFAULT_SETTINGS));
+  const normalized = GEJQ.normalizeSettings({
+    advancedQuery: false,
+    queryLanguage: 'klingon',
+    autoFetchMaxPages: 99999,
+    historyLimit: 12.7
+  });
+  assert.equal(normalized.advancedQuery, false);
+  assert.equal(normalized.queryLanguage, 'jmespath');
+  assert.equal(normalized.autoFetchMaxPages, 1000);
+  assert.equal(normalized.historyLimit, 12);
+  assert.equal(normalized.autoSignIn, true);
+});
+
+// ------------------------------------------- Graph (OData) equivalents
+
+test('toGraphQuery translates JMESPath filters, selects, and sorts', () => {
+  const full = GEJQ.toGraphQuery('jmespath', "value[?jobTitle == 'Auditor'].{name: displayName, email: mail}");
+  assert.equal(full.ok, true);
+  assert.equal(full.params.filter, "jobTitle eq 'Auditor'");
+  assert.deepEqual(full.params.select, ['displayName', 'mail']);
+  assert.equal(full.residual, 'value[].{name: displayName, email: mail}');
+  assert.equal(full.advanced, true);
+  assert.deepEqual(full.notes, []);
+
+  const sorted = GEJQ.toGraphQuery('jmespath', 'sort_by(value, &displayName)[].displayName');
+  assert.equal(sorted.params.orderby, 'displayName');
+  assert.deepEqual(sorted.params.select, ['displayName']);
+  assert.equal(sorted.residual, 'value[].displayName');
+
+  const desc = GEJQ.toGraphQuery('jmespath', 'reverse(sort_by(value, &displayName))');
+  assert.equal(desc.params.orderby, 'displayName desc');
+
+  const fn = GEJQ.toGraphQuery('jmespath', "value[?starts_with(displayName, 'A')]");
+  assert.equal(fn.params.filter, "startswith(displayName,'A')");
+  assert.equal(fn.residual, 'value[]');
+});
+
+test('toGraphQuery translates counts to $count / @odata.count', () => {
+  const count = GEJQ.toGraphQuery('jmespath', 'length(value)');
+  assert.equal(count.params.count, true);
+  assert.equal(count.residual, '"@odata.count"');
+
+  const filtered = GEJQ.toGraphQuery('jmespath', "length(value[?jobTitle == 'Auditor'])");
+  assert.equal(filtered.params.count, true);
+  assert.equal(filtered.params.filter, "jobTitle eq 'Auditor'");
+
+  const jq = GEJQ.toGraphQuery('jq', '.value | length');
+  assert.equal(jq.params.count, true);
+  assert.equal(jq.residual, '."@odata.count"');
+
+  const jsonpath = GEJQ.toGraphQuery('jsonpath', '$.value.length');
+  assert.equal(jsonpath.params.count, true);
+  assert.equal(jsonpath.residual, "$['@odata.count']");
+});
+
+test('toGraphQuery translates slices and indexes to $top/$skip', () => {
+  const top = GEJQ.toGraphQuery('jmespath', 'value[0:5]');
+  assert.equal(top.params.top, 5);
+  assert.equal(top.params.skip, null);
+
+  const window = GEJQ.toGraphQuery('jq', '.value[2:8]');
+  assert.equal(window.params.top, 6);
+  assert.equal(window.params.skip, 2);
+  assert.equal(window.residual, '.value');
+
+  const index = GEJQ.toGraphQuery('jmespath', 'value[2].displayName');
+  assert.equal(index.params.top, 1);
+  assert.equal(index.params.skip, 2);
+  assert.equal(index.residual, 'value[0].displayName');
+  assert.deepEqual(index.params.select, ['displayName']);
+});
+
+test('toGraphQuery translates jq pipelines stage by stage', () => {
+  const filtered = GEJQ.toGraphQuery('jq', '.value | map(select(.jobTitle == "Auditor")) | .[].displayName');
+  assert.equal(filtered.ok, true);
+  assert.equal(filtered.params.filter, "jobTitle eq 'Auditor'");
+  assert.deepEqual(filtered.params.select, ['displayName']);
+  assert.equal(filtered.residual, '.value | .[].displayName');
+
+  const wrapped = GEJQ.toGraphQuery('jq', '[.value[] | {name: .displayName, email: .mail}]');
+  assert.deepEqual(wrapped.params.select, ['displayName', 'mail']);
+  assert.equal(wrapped.residual, '[.value[] | {name: .displayName, email: .mail}]');
+
+  const existsFilter = GEJQ.toGraphQuery('jq', '.value[] | select(.mail != null) | .mail');
+  assert.equal(existsFilter.params.filter, 'mail ne null');
+  assert.equal(existsFilter.residual, '.value[] | .mail');
+
+  const sortedDesc = GEJQ.toGraphQuery('jq', '.value | sort_by(.displayName) | reverse');
+  assert.equal(sortedDesc.params.orderby, 'displayName desc');
+  assert.equal(sortedDesc.residual, '.value');
+});
+
+test('toGraphQuery translates JSONPath filters and selections', () => {
+  const filtered = GEJQ.toGraphQuery('jsonpath', "$.value[?(@.jobTitle == 'Auditor')].displayName");
+  assert.equal(filtered.params.filter, "jobTitle eq 'Auditor'");
+  assert.deepEqual(filtered.params.select, ['displayName']);
+  assert.equal(filtered.residual, '$.value[*].displayName');
+
+  const exists = GEJQ.toGraphQuery('jsonpath', '$.value[?(@.mail)]');
+  assert.equal(exists.params.filter, 'mail ne null');
+
+  const sliced = GEJQ.toGraphQuery('jsonpath', '$.value[0:5].mail');
+  assert.equal(sliced.params.top, 5);
+  assert.deepEqual(sliced.params.select, ['mail']);
+});
+
+test('toGraphQuery keeps untranslatable parts client-side with notes', () => {
+  const partial = GEJQ.toGraphQuery('jq', '.value | map(select(.a == 1)) | map(select(.b | test("x")))');
+  assert.equal(partial.ok, true);
+  assert.equal(partial.params.filter, 'a eq 1');
+  assert.equal(partial.residual, '.value | map(select(.b | test("x")))');
+  assert.equal(partial.notes.length, 1);
+  assert.ok(partial.notes[0].includes('test("x")'), partial.notes[0]);
+  // A client-side filter needs full objects — no $select may be emitted.
+  assert.deepEqual(partial.params.select, []);
+
+  const nested = GEJQ.toGraphQuery('jmespath', "value[?contains(assignedLicenses[].skuId, 'x')].displayName");
+  assert.equal(nested.ok, false); // nothing translatable at all
+});
+
+test('toGraphQuery escapes and types OData literals', () => {
+  const quote = GEJQ.toGraphQuery('jmespath', "value[?displayName == 'O'Brien']");
+  // JMESPath raw-string quoting aside, verify doubled quotes via jq:
+  const jqQuote = GEJQ.toGraphQuery('jq', '.value | map(select(.displayName == "O\'Brien"))');
+  assert.equal(jqQuote.params.filter, "displayName eq 'O''Brien'");
+  const num = GEJQ.toGraphQuery('jmespath', 'value[?age > `30`]');
+  assert.equal(num.params.filter, 'age gt 30');
+  const bool = GEJQ.toGraphQuery('jq', '.value | map(select(.accountEnabled == true))');
+  assert.equal(bool.params.filter, 'accountEnabled eq true');
+  void quote;
+});
+
+test('toGraphQuery rejects queries with no server-side part', () => {
+  assert.equal(GEJQ.toGraphQuery('jmespath', 'value[]').ok, false);
+  assert.equal(GEJQ.toGraphQuery('jmespath', 'keys(@)').ok, false);
+  assert.equal(GEJQ.toGraphQuery('jsonpath', '$..displayName').ok, false);
+  assert.equal(GEJQ.toGraphQuery('jq', '.value[] | .displayName | ascii_downcase').ok, false);
+  assert.equal(GEJQ.toGraphQuery('jmespath', '').ok, false);
+  assert.equal(GEJQ.toGraphQuery('jmespath', '"@odata.nextLink"').ok, false);
+});
+
+test('graphQueryUrl merges params into the source request URL', () => {
+  const merged = GEJQ.graphQueryUrl('https://graph.microsoft.com/v1.0/users?$top=10&$filter=accountEnabled eq true', {
+    filter: "jobTitle eq 'Auditor'",
+    select: ['displayName'],
+    orderby: null,
+    top: 5,
+    skip: null,
+    count: false
+  });
+  assert.equal(
+    merged.url,
+    "https://graph.microsoft.com/v1.0/users?$filter=(accountEnabled eq true) and (jobTitle eq 'Auditor')&$select=displayName&$top=5"
+  );
+  assert.equal(merged.notes.length, 2);
+
+  const plain = GEJQ.graphQueryUrl('https://graph.microsoft.com/v1.0/users', {
+    filter: null,
+    select: ['id'],
+    orderby: 'displayName',
+    top: null,
+    skip: null,
+    count: true
+  });
+  assert.equal(plain.url, 'https://graph.microsoft.com/v1.0/users?$select=id&$orderby=displayName&$count=true');
+
+  assert.equal(GEJQ.graphQueryUrl('pasted JSON #1', { filter: null, select: [], orderby: null, top: null, skip: null, count: false }), null);
 });

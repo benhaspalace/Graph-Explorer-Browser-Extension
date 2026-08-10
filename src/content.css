@@ -533,6 +533,43 @@
   font-size: 11px;
 }
 
+/* ------------------------------------------------- auto-fetch status row */
+
+.gejq-fetch-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 0 4px 12px;
+  font-size: 12px;
+  color: var(--gejq-text-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.gejq-fetch-btn {
+  flex: 0 0 auto;
+  min-width: 22px;
+  padding: 1px 5px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-accent);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.gejq-fetch-btn:hover {
+  border-color: var(--gejq-accent);
+}
+
+.gejq-fetch-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 11px;
+}
+
 /* ------------------------------------------------------------------ table */
 
 .gejq-table-scroll {
@@ -722,11 +759,78 @@
   width: auto !important;
 }
 
-.gejq-diff-toggle.gejq-tag-active {
+.gejq-diff-toggle.gejq-tag-active,
+.gejq-autofetch-toggle.gejq-tag-active,
+.gejq-grapheq-toggle.gejq-tag-active {
   color: #ffffff;
   background: var(--gejq-accent);
   border-radius: 4px;
   opacity: 1;
+}
+
+/* --------------------------------------------- Graph (OData) equivalent */
+
+.gejq-grapheq {
+  margin: 0 12px 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 6px;
+  background: var(--gejq-bg-subtle);
+  font-size: 12px;
+}
+
+.gejq-grapheq-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.gejq-grapheq-line + .gejq-grapheq-line {
+  margin-top: 4px;
+}
+
+.gejq-grapheq-label {
+  flex: 0 0 auto;
+  color: var(--gejq-text-subtle);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.gejq-grapheq-text {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--gejq-border);
+  border-radius: 4px;
+  background: var(--gejq-bg);
+  color: var(--gejq-text);
+  font-family: Consolas, "Cascadia Code", Menlo, monospace;
+  font-size: 11px;
+}
+
+/* The part that must stay client-side — highlighted so it stands out
+   from the server-side request above it. */
+.gejq-chip.gejq-grapheq-residual {
+  color: var(--gejq-warn);
+  border-color: var(--gejq-warn);
+  background: color-mix(in srgb, var(--gejq-warn) 12%, var(--gejq-bg));
+}
+
+.gejq-grapheq-hint {
+  color: var(--gejq-text-subtle);
+  font-size: 11px;
+}
+
+.gejq-grapheq-note {
+  margin-top: 3px;
+  color: var(--gejq-text-subtle);
+  font-size: 11px;
+}
+
+.gejq-grapheq-reason {
+  color: var(--gejq-text-subtle);
+  font-size: 12px;
 }
 
 .gejq-warning {

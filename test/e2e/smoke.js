@@ -659,11 +659,94 @@ function check(name, ok, extra) {
     (await page.evaluate(() => document.getElementById('ge-method').textContent.trim())) === 'GET'
   );
 
-  // 10c. Lowering the auto-fetch page limit truncates and warns.
+  // 10c. Reaching the auto-fetch page limit PAUSES the chain (with resume/
+  // step/stop controls on the metrics row) instead of ending it.
   await popup.fill('#setting-auto-fetch-pages', '2');
   await popup.dispatchEvent('#setting-auto-fetch-pages', 'change');
   await page.waitForTimeout(500);
   await page.evaluate(() => window.runGraphQuery('/v1.0/users?paged=1'));
+  const fetchStatusText = () =>
+    page.evaluate(() => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const box = shadow.querySelector('.gejq-fetch-status');
+      return box && box.style.display !== 'none' ? box.textContent : '';
+    });
+  try {
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        const box = shadow.querySelector('.gejq-fetch-status');
+        return box && box.style.display !== 'none' && box.textContent.includes('Paused');
+      },
+      { timeout: 10000 }
+    );
+    check('page limit pauses the chain with controls on the metrics row', true);
+  } catch (e) {
+    check('page limit pauses the chain with controls on the metrics row', false, e.message.split('\n')[0]);
+  }
+  const pausedStatus = await fetchStatusText();
+  check('paused status names the page limit', /page limit/i.test(pausedStatus), pausedStatus.slice(0, 90));
+  const pausedOptions = await page.evaluate(() =>
+    Array.from(document.getElementById('gejq-host').shadowRoot.querySelectorAll('.gejq-history-select option')).map(
+      (o) => o.textContent
+    )
+  );
+  check('paused chain posts the partial dataset ("so far")', pausedOptions.some((t) => t.includes('2 pages so far')), pausedOptions[0]);
+  check(
+    'no incomplete-dataset warning while merely paused',
+    (await page.locator('.gejq-warning').innerText()).trim() === ''
+  );
+  const fetchControl = (label) =>
+    page.evaluate((wanted) => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const btn = Array.from(shadow.querySelectorAll('.gejq-fetch-status .gejq-fetch-btn')).find(
+        (b) => b.textContent === wanted
+      );
+      if (btn) btn.click();
+      return !!btn;
+    }, label);
+  // Step (+1 page) continues PAST the configured limit and, with only one
+  // page left, completes the dataset: 3 pages, not marked incomplete.
+  check('step button present while paused', await fetchControl('+1'));
+  try {
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        const options = Array.from(shadow.querySelectorAll('.gejq-history-select option'));
+        const box = shadow.querySelector('.gejq-fetch-status');
+        return (
+          options.some((o) => o.textContent.includes('3 pages') && !o.textContent.includes('incomplete')) &&
+          !options.some((o) => o.textContent.includes('so far')) &&
+          (!box || box.style.display === 'none')
+        );
+      },
+      { timeout: 10000 }
+    );
+    check('stepping past the limit completes the dataset', true);
+  } catch (e) {
+    check('stepping past the limit completes the dataset', false, e.message.split('\n')[0]);
+  }
+  await query.fill('$.value.length');
+  await page.waitForTimeout(400);
+  check('stepped dataset holds all 9 items', (await page.locator('.gejq-result').innerText()).trim().includes('9'));
+  check(
+    'metrics row says the result was auto-fetched',
+    (await page.locator('.gejq-meta-right').innerText()).includes('auto-fetched'),
+    await page.locator('.gejq-meta-right').innerText()
+  );
+
+  // 10c2. Stopping a paused chain keeps what was fetched and says WHY the
+  // dataset is incomplete — a user stop, never a configured limit.
+  await page.evaluate(() => window.runGraphQuery('/v1.0/users?paged=1'));
+  await page.waitForFunction(
+    () => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const box = shadow.querySelector('.gejq-fetch-status');
+      return box && box.style.display !== 'none' && box.textContent.includes('Paused');
+    },
+    { timeout: 10000 }
+  );
+  check('stop button present while paused', await fetchControl('■'));
   try {
     await page.waitForFunction(
       () => {
@@ -673,12 +756,15 @@ function check(name, ok, extra) {
       },
       { timeout: 10000 }
     );
-    check('lowered page limit marks the entry incomplete', true);
+    check('stopped chain marks the entry incomplete', true);
   } catch (e) {
-    check('lowered page limit marks the entry incomplete', false, e.message.split('\n')[0]);
+    check('stopped chain marks the entry incomplete', false, e.message.split('\n')[0]);
   }
+  await query.fill('$.value.length');
+  await page.waitForTimeout(400);
   const warningText = await page.locator('.gejq-warning').innerText();
-  check('truncation warning shown to the user', /incomplete|stopped early/i.test(warningText), warningText.slice(0, 90));
+  check('warning says the fetch was stopped', /stopped/i.test(warningText), warningText.slice(0, 90));
+  check('warning does not blame a configured limit', !/limit/i.test(warningText), warningText.slice(0, 90));
 
   // 10d. Switching languages auto-converts simple queries.
   await query.fill('$.value[*].displayName');
@@ -688,6 +774,73 @@ function check(name, ok, extra) {
   check('language switch converts the query', (await queryValue()) === 'value[].displayName', await queryValue());
   check('converted query runs without error', (await page.locator('.gejq-panel .gejq-error').first().innerText()).trim() === '');
   check('converted query returns data', (await page.locator('.gejq-result').innerText()).includes('Nestor Wilke'));
+
+  // 10d2. The ⇗ button shows the Graph (OData) equivalent of the query:
+  // server-side parameters merged into the captured request URL plus the
+  // highlighted client-side residual.
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-grapheq-toggle').click());
+  await page.waitForTimeout(300);
+  const graphEq = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const box = shadow.querySelector('.gejq-grapheq');
+    return {
+      visible: box.style.display !== 'none',
+      server: (shadow.querySelector('.gejq-grapheq-text') || {}).value || '',
+      residual: (shadow.querySelector('.gejq-grapheq-residual') || {}).textContent || ''
+    };
+  });
+  check('Graph equivalent panel opens', graphEq.visible);
+  check(
+    'server line carries $select merged into the request URL',
+    graphEq.server.startsWith('GET https://graph.microsoft.com/v1.0/users') && graphEq.server.includes('$select=displayName'),
+    graphEq.server
+  );
+  check('client-side residual shown highlighted', graphEq.residual === 'value[].displayName', graphEq.residual);
+  // A filter translates too, and the residual drops the translated part.
+  await query.fill("value[?jobTitle == 'Auditor'].mail");
+  await page.waitForTimeout(400);
+  const graphEqFilter = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      server: (shadow.querySelector('.gejq-grapheq-text') || {}).value || '',
+      residual: (shadow.querySelector('.gejq-grapheq-residual') || {}).textContent || ''
+    };
+  });
+  check(
+    'filters become $filter on the server line',
+    graphEqFilter.server.includes("$filter=jobTitle eq 'Auditor'") && graphEqFilter.server.includes('$select=mail'),
+    graphEqFilter.server
+  );
+  check('residual keeps only the client-side part', graphEqFilter.residual === 'value[].mail', graphEqFilter.residual);
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-grapheq-toggle').click());
+  await page.waitForTimeout(200);
+  check(
+    'Graph equivalent panel toggles off',
+    await page.evaluate(
+      () => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-grapheq').style.display === 'none'
+    )
+  );
+
+  // 10d3. The panel's ⟳ chip toggles the auto-fetch setting in place.
+  const autoFetchChip = () =>
+    page.evaluate(() => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const chip = shadow.querySelector('.gejq-autofetch-toggle');
+      return { pressed: chip.getAttribute('aria-pressed'), title: chip.title };
+    });
+  check('auto-fetch chip reflects the enabled setting', (await autoFetchChip()).pressed === 'true');
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autofetch-toggle').click());
+  await page.waitForTimeout(400);
+  check('clicking the chip turns auto-fetch off', (await autoFetchChip()).pressed === 'false');
+  await popup.reload();
+  await popup.waitForTimeout(300);
+  check(
+    'popup shows the setting the chip changed',
+    !(await popup.isChecked('#setting-auto-fetch'))
+  );
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autofetch-toggle').click());
+  await page.waitForTimeout(400);
+  check('clicking the chip again turns auto-fetch back on', (await autoFetchChip()).pressed === 'true');
 
   // 10e. Unconvertible queries keep their text, but suggestions follow
   // the new language even while the query errors: `$..displayName` has

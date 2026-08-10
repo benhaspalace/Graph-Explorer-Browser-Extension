@@ -15,11 +15,11 @@
 
   var PLAIN_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-  /** Clamp to an integer in [min, max]; `fallback` when not a usable number. */
+  /** Clamp to an integer in [min, max]; `fallback` when not a number at all. */
   function clampInt(value, min, max, fallback) {
     var parsed = typeof value === 'string' ? parseInt(value, 10) : value;
-    if (typeof parsed === 'number' && isFinite(parsed) && parsed >= min) {
-      return Math.min(Math.floor(parsed), max);
+    if (typeof parsed === 'number' && isFinite(parsed)) {
+      return Math.min(Math.max(Math.floor(parsed), min), max);
     }
     return fallback;
   }
@@ -85,6 +85,103 @@
     return (value >= 100 ? Math.round(value) : Math.round(value * 10) / 10) + ' ' + unit;
   }
 
+  /**
+   * JSON.stringify(value, null, 2) with a character budget: serialization
+   * stops as soon as `maxChars` is exceeded, so rendering a preview of a
+   * huge query result never builds the full multi-megabyte string (which
+   * froze the tab on large auto-fetched datasets). The emitted prefix is
+   * byte-identical to what JSON.stringify would produce. Only operates on
+   * JSON-shaped data (anything parsed from JSON is safe; no cycle guard).
+   * Returns { text, truncated, length } — when truncated, `length` is the
+   * length of the emitted prefix, a lower bound on the full size.
+   */
+  function stringifyLimited(value, maxChars) {
+    var limit = typeof maxChars === 'number' && maxChars > 0 ? maxChars : Infinity;
+    var LIMIT = {};
+    var parts = [];
+    var size = 0;
+    var truncated = false;
+
+    function push(text) {
+      parts.push(text);
+      size += text.length;
+      if (size > limit) {
+        truncated = true;
+        throw LIMIT;
+      }
+    }
+
+    function skipped(v) {
+      // Mirrors JSON.stringify: these become null in arrays, vanish in objects.
+      return v === undefined || typeof v === 'function' || typeof v === 'symbol';
+    }
+
+    function walk(v, indent) {
+      if (v === null) {
+        push('null');
+        return;
+      }
+      var type = typeof v;
+      if (type === 'number') {
+        push(isFinite(v) ? String(v) : 'null');
+        return;
+      }
+      if (type === 'boolean') {
+        push(v ? 'true' : 'false');
+        return;
+      }
+      if (type === 'string') {
+        push(JSON.stringify(v));
+        return;
+      }
+      var childIndent = indent + '  ';
+      if (Array.isArray(v)) {
+        if (v.length === 0) {
+          push('[]');
+          return;
+        }
+        push('[\n');
+        for (var i = 0; i < v.length; i++) {
+          push(childIndent);
+          if (skipped(v[i])) {
+            push('null');
+          } else {
+            walk(v[i], childIndent);
+          }
+          push(i < v.length - 1 ? ',\n' : '\n');
+        }
+        push(indent + ']');
+        return;
+      }
+      var keys = Object.keys(v).filter(function (key) {
+        return !skipped(v[key]);
+      });
+      if (keys.length === 0) {
+        push('{}');
+        return;
+      }
+      push('{\n');
+      for (var k = 0; k < keys.length; k++) {
+        push(childIndent + JSON.stringify(keys[k]) + ': ');
+        walk(v[keys[k]], childIndent);
+        push(k < keys.length - 1 ? ',\n' : '\n');
+      }
+      push(indent + '}');
+    }
+
+    if (value === undefined || skipped(value)) {
+      return { text: undefined, truncated: false, length: 0 };
+    }
+    try {
+      walk(value, '');
+    } catch (e) {
+      if (e !== LIMIT) {
+        throw e;
+      }
+    }
+    return { text: parts.join(''), truncated: truncated, length: size };
+  }
+
   /** Compact display form of a Graph URL: path + query, origin stripped. */
   function summarizeUrl(url, maxLength) {
     var max = maxLength || 80;
@@ -115,6 +212,77 @@
       return entries;
     }
     return entries.slice(0, max);
+  }
+
+  /**
+   * Trim the captured-response list (newest first) to `max` entries —
+   * but count manual entries (pinned results, pasted JSON) separately,
+   * so sources the user created deliberately are never pushed out by a
+   * stream of new Graph responses. Each pool is capped at `max`.
+   */
+  function trimResponses(entries, max) {
+    if (!Array.isArray(entries)) {
+      return [];
+    }
+    var out = [];
+    var live = 0;
+    var manual = 0;
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      if (!entry) {
+        continue;
+      }
+      if (entry.manual) {
+        if (manual < max) {
+          out.push(entry);
+          manual++;
+        }
+      } else if (live < max) {
+        out.push(entry);
+        live++;
+      }
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------- settings
+
+  var VALID_LANGUAGES = ['jmespath', 'jsonpath', 'jq'];
+
+  /**
+   * The extension's stored defaults — the single source of truth shared
+   * by the panel (content.js) and the settings popup (popup.js).
+   */
+  var DEFAULT_SETTINGS = Object.freeze({
+    advancedQuery: true,
+    autoSignIn: true,
+    autoFetchNextLink: true,
+    autoFetchMaxPages: 50,
+    autoFetchMaxMb: 10,
+    queryLanguage: 'jmespath',
+    historyLimit: 50, // 0 = unlimited
+    showBackgroundRequests: false,
+    richEditor: true // CodeMirror editor by default; can fall back to a plain textarea
+  });
+
+  /** A raw stored settings object → complete, validated settings. */
+  function normalizeSettings(raw) {
+    var historyLimit =
+      raw && typeof raw.historyLimit === 'number' && raw.historyLimit >= 0
+        ? Math.floor(raw.historyLimit)
+        : DEFAULT_SETTINGS.historyLimit;
+    return {
+      advancedQuery: !raw || raw.advancedQuery !== false,
+      autoSignIn: !raw || raw.autoSignIn !== false,
+      autoFetchNextLink: !raw || raw.autoFetchNextLink !== false,
+      autoFetchMaxPages: clampInt(raw && raw.autoFetchMaxPages, 1, 1000, DEFAULT_SETTINGS.autoFetchMaxPages),
+      autoFetchMaxMb: clampInt(raw && raw.autoFetchMaxMb, 1, 50, DEFAULT_SETTINGS.autoFetchMaxMb),
+      queryLanguage:
+        raw && VALID_LANGUAGES.indexOf(raw.queryLanguage) !== -1 ? raw.queryLanguage : DEFAULT_SETTINGS.queryLanguage,
+      historyLimit: historyLimit,
+      showBackgroundRequests: !!raw && raw.showBackgroundRequests === true,
+      richEditor: !raw || raw.richEditor !== false
+    };
   }
 
   /** JSONPath accessor for a key: `.key` or bracket-quoted. */
@@ -1360,6 +1528,1019 @@
     return { ok: true, query: emitted };
   }
 
+  // ------------------------------------ Microsoft Graph (OData) equivalent
+  //
+  // toGraphQuery() translates a panel query into the OData query options
+  // ($filter, $select, $orderby, $top/$skip, $count) that would make the
+  // server do the same work. Translation is prefix-based and best-effort:
+  // constructs with a server-side equivalent become parameters, the first
+  // construct without one stops translation, and everything that must
+  // still run client-side is returned as the `residual` query (with notes
+  // naming the untranslatable pieces).
+
+  var ODATA_OPS = { '==': 'eq', '!=': 'ne', '<': 'lt', '<=': 'le', '>': 'gt', '>=': 'ge' };
+  var ODATA_STRING_FUNCTIONS = {
+    starts_with: 'startswith',
+    startswith: 'startswith',
+    ends_with: 'endswith',
+    endswith: 'endswith',
+    contains: 'contains'
+  };
+
+  function odataLiteral(literal) {
+    if (literal.kind === 'number') {
+      return String(literal.v);
+    }
+    if (literal.kind === 'null') {
+      return 'null';
+    }
+    if (literal.kind === 'boolean') {
+      return literal.v ? 'true' : 'false';
+    }
+    return "'" + String(literal.v).replace(/'/g, "''") + "'";
+  }
+
+  /** OData $filter clause for a parsed comparison filter, or null. */
+  function odataFilterClause(segment) {
+    if (!PLAIN_IDENTIFIER.test(segment.field)) {
+      return null;
+    }
+    if (!segment.op) {
+      return segment.field + ' ne null';
+    }
+    var op = ODATA_OPS[segment.op];
+    if (!op || !segment.value) {
+      return null;
+    }
+    return segment.field + ' ' + op + ' ' + odataLiteral(segment.value);
+  }
+
+  /** OData clause for a string-function filter, or null. */
+  function odataFunctionClause(fn, field, literal) {
+    var name = ODATA_STRING_FUNCTIONS[fn];
+    if (!name || !PLAIN_IDENTIFIER.test(field) || !literal || literal.kind !== 'string') {
+      return null;
+    }
+    return name + '(' + field + ',' + odataLiteral(literal) + ')';
+  }
+
+  /** Read `name(...)` at the start of `text` → { inner, rest } or null. */
+  function readCall(text, name) {
+    if (text.slice(0, name.length + 1) !== name + '(') {
+      return null;
+    }
+    var depth = 0;
+    var quote = null;
+    for (var i = name.length; i < text.length; i++) {
+      var ch = text[i];
+      if (quote) {
+        if (ch === '\\') {
+          i++;
+        } else if (ch === quote) {
+          quote = null;
+        }
+      } else if (ch === "'" || ch === '"' || ch === '`') {
+        quote = ch;
+      } else if (ch === '(') {
+        depth++;
+      } else if (ch === ')') {
+        depth--;
+        if (depth === 0) {
+          return { inner: text.slice(name.length + 1, i), rest: text.slice(i + 1) };
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Read a `{…}`-style group starting at `start` → { inner, end } | null. */
+  function readGroup(text, start, open, close) {
+    if (text[start] !== open) {
+      return null;
+    }
+    var depth = 0;
+    var quote = null;
+    for (var i = start; i < text.length; i++) {
+      var ch = text[i];
+      if (quote) {
+        if (ch === '\\') {
+          i++;
+        } else if (ch === quote) {
+          quote = null;
+        }
+      } else if (ch === "'" || ch === '"' || ch === '`') {
+        quote = ch;
+      } else if (ch === open) {
+        depth++;
+      } else if (ch === close) {
+        depth--;
+        if (depth === 0) {
+          return { inner: text.slice(start + 1, i), end: i + 1 };
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Split on a single-character separator at nesting depth 0. */
+  function splitTopLevel(text, separator) {
+    var parts = [];
+    var start = 0;
+    var depth = 0;
+    var quote = null;
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (quote) {
+        if (ch === '\\') {
+          i++;
+        } else if (ch === quote) {
+          quote = null;
+        }
+      } else if (ch === "'" || ch === '"' || ch === '`') {
+        quote = ch;
+      } else if (ch === '(' || ch === '[' || ch === '{') {
+        depth++;
+      } else if (ch === ')' || ch === ']' || ch === '}') {
+        depth--;
+      } else if (ch === separator && depth === 0) {
+        parts.push(text.slice(start, i));
+        start = i + 1;
+      }
+    }
+    parts.push(text.slice(start));
+    return parts;
+  }
+
+  /**
+   * $select keys from a JMESPath multiselect hash body ({alias: key, …}).
+   * `complex` counts members whose value is more than a plain key — their
+   * source fields are unknown, so callers must not emit $select for them.
+   */
+  function multiselectSelectKeys(inner) {
+    var keys = [];
+    var complex = 0;
+    splitTopLevel(inner, ',').forEach(function (pair) {
+      var colon = pair.indexOf(':');
+      if (colon === -1) {
+        complex++;
+        return;
+      }
+      var value = pair.slice(colon + 1).trim();
+      var quoted = value[0] === '"' ? readQuoted(value, 0, '"') : null;
+      if (quoted && quoted.end === value.length && PLAIN_IDENTIFIER.test(quoted.value)) {
+        keys.push(quoted.value);
+      } else if (PLAIN_IDENTIFIER.test(value)) {
+        keys.push(value);
+      } else {
+        complex++;
+      }
+    });
+    return { keys: keys, complex: complex };
+  }
+
+  /** `[?starts_with(field, 'x')]`-style JMESPath function filters. */
+  function parseJmesFunctionFilter(inner) {
+    var trimmed = inner.trim();
+    if (trimmed[0] !== '?') {
+      return null;
+    }
+    var match = /^([A-Za-z_][A-Za-z0-9_]*)\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*([\s\S]+)\)\s*$/.exec(trimmed.slice(1).trim());
+    if (!match || !ODATA_STRING_FUNCTIONS[match[1]]) {
+      return null;
+    }
+    var literal = parseFilterLiteral(match[3].trim());
+    if (!literal || literal.kind !== 'string') {
+      return null;
+    }
+    return { type: 'filterfn', fn: match[1], field: match[2], value: literal };
+  }
+
+  /**
+   * Loose JMESPath path scan: like parseJmesPathQuery, but a bracket
+   * group it can't interpret becomes an `opaque` segment (kept verbatim
+   * client-side) instead of failing the whole parse, string-function
+   * filters are recognized, and a trailing `.{…}` multiselect is allowed.
+   * Every segment carries its source text in `raw`.
+   */
+  function scanJmesPathLoose(text) {
+    var segments = [];
+    var i = 0;
+    while (i < text.length) {
+      var ch = text[i];
+      if (ch === '.') {
+        if (segments.length === 0) {
+          return null;
+        }
+        i++;
+        ch = text[i];
+        if (ch === undefined) {
+          return null;
+        }
+      }
+      if (ch === '"') {
+        var quoted = readQuoted(text, i, '"');
+        if (!quoted) {
+          return null;
+        }
+        segments.push({ type: 'key', name: quoted.value, raw: text.slice(i, quoted.end) });
+        i = quoted.end;
+      } else if (/[A-Za-z_]/.test(ch)) {
+        var ident = /^[A-Za-z_][A-Za-z0-9_]*/.exec(text.slice(i))[0];
+        segments.push({ type: 'key', name: ident, raw: ident });
+        i += ident.length;
+      } else if (ch === '[') {
+        var bracket = readBracket(text, i);
+        if (!bracket) {
+          return null;
+        }
+        var segment = null;
+        try {
+          segment = parseBracketInner(bracket.inner, 'jmespath');
+        } catch (e) {
+          segment = null;
+        }
+        if (!segment || segment.type === 'key') {
+          segment = parseJmesFunctionFilter(bracket.inner) || { type: 'opaque' };
+        }
+        segment.raw = text.slice(i, bracket.end);
+        segments.push(segment);
+        i = bracket.end;
+      } else if (ch === '{' && segments.length > 0) {
+        var brace = readGroup(text, i, '{', '}');
+        if (!brace || brace.end !== text.length) {
+          return null; // multiselect only supported at the very end
+        }
+        segments.push({ type: 'multiselect', inner: brace.inner, raw: text.slice(i, brace.end) });
+        i = brace.end;
+      } else {
+        return null;
+      }
+    }
+    return segments.length > 0 ? segments : null;
+  }
+
+  /** Loose JSONPath scan (same idea; `$` root handled by the caller). */
+  function scanJsonPathLoose(text) {
+    if (text[0] !== '$') {
+      return null;
+    }
+    var segments = [];
+    var i = 1;
+    while (i < text.length) {
+      var ch = text[i];
+      if (ch === '.') {
+        if (text[i + 1] === '.') {
+          return null; // recursive descent has no OData equivalent
+        }
+        i++;
+        var ident = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(text.slice(i));
+        if (!ident) {
+          return null;
+        }
+        segments.push({ type: 'key', name: ident[0], raw: '.' + ident[0] });
+        i += ident[0].length;
+      } else if (ch === '[') {
+        var bracket = readBracket(text, i);
+        if (!bracket) {
+          return null;
+        }
+        var segment = null;
+        try {
+          segment = parseBracketInner(bracket.inner, 'jsonpath');
+        } catch (e) {
+          segment = null;
+        }
+        if (!segment) {
+          segment = { type: 'opaque' };
+        }
+        segment.raw = text.slice(i, bracket.end);
+        segments.push(segment);
+        i = bracket.end;
+      } else {
+        return null;
+      }
+    }
+    return segments.length > 0 ? segments : null;
+  }
+
+  /**
+   * Walk loose path segments over the response's `value` collection and
+   * split them into server-side OData parameters plus the client-side
+   * residual (ordered text parts). Prefix-based: the first construct
+   * without a server-side equivalent stops translation; everything after
+   * stays in the residual untouched. Shared by the JMESPath and JSONPath
+   * translators; `tokens` supplies the language-specific spellings.
+   */
+  function interpretCollectionSegments(segments, tokens) {
+    if (segments[0].type !== 'key' || segments[0].name !== 'value') {
+      return null;
+    }
+    var params = { filter: null, select: [], orderby: null, top: null, skip: null, count: false };
+    var clauses = [];
+    var notes = [];
+    var parts = [tokens.key(segments[0], true)];
+    var selectKeys = [];
+    var phase = 'collection'; // 'items' once a wildcard/filter projects into items
+    var translating = true;
+    var suppressSelect = false;
+    var sliceTranslated = false;
+    var countable = true; // stays true only while segments reduce to value(+filters)
+
+    function pushPass() {
+      if (parts[parts.length - 1] !== tokens.pass) {
+        parts.push(tokens.pass);
+      }
+    }
+
+    function clientNote(raw) {
+      notes.push(raw + ' stays client-side (no simple OData equivalent)');
+    }
+
+    for (var s = 1; s < segments.length; s++) {
+      var seg = segments[s];
+      if (seg.type === 'wildcard') {
+        phase = 'items';
+        countable = false;
+        pushPass();
+      } else if (seg.type === 'filter' || seg.type === 'filterfn') {
+        var clause = null;
+        if (translating && phase === 'collection' && !sliceTranslated) {
+          clause = seg.type === 'filterfn' ? odataFunctionClause(seg.fn, seg.field, seg.value) : odataFilterClause(seg);
+        }
+        if (clause) {
+          clauses.push(clause);
+          phase = 'items';
+          pushPass();
+        } else {
+          translating = false;
+          suppressSelect = true; // a client filter needs the full objects
+          countable = false;
+          phase = 'items';
+          parts.push(seg.raw);
+          clientNote(seg.raw);
+        }
+      } else if (seg.type === 'index') {
+        countable = false;
+        if (translating && phase === 'collection' && !sliceTranslated && seg.value >= 0) {
+          if (seg.value > 0) {
+            params.skip = seg.value;
+          }
+          params.top = 1;
+          sliceTranslated = true;
+          parts.push('[0]'); // the server returns exactly the wanted item
+        } else {
+          translating = false;
+          parts.push(seg.raw);
+        }
+        phase = 'items'; // a key after an index reads the item's properties
+      } else if (seg.type === 'slice') {
+        countable = false;
+        var from = seg.from === '' ? 0 : parseInt(seg.from, 10);
+        var to = seg.to === '' ? null : parseInt(seg.to, 10);
+        if (translating && phase === 'collection' && !sliceTranslated && from >= 0 && (to === null || to > from)) {
+          if (from > 0) {
+            params.skip = from;
+          }
+          if (to !== null) {
+            params.top = to - from;
+          }
+          sliceTranslated = true;
+          pushPass(); // server already returns exactly the window
+        } else {
+          translating = false;
+          parts.push(seg.raw);
+        }
+        phase = 'items'; // slices project into the items
+      } else if (seg.type === 'key') {
+        countable = false;
+        if (phase === 'items') {
+          if (selectKeys.length === 0 && PLAIN_IDENTIFIER.test(seg.name)) {
+            selectKeys.push(seg.name);
+          }
+        } else {
+          translating = false; // value.foo — not a collection operation
+        }
+        parts.push(tokens.key(seg, false));
+      } else if (seg.type === 'multiselect') {
+        countable = false;
+        if (s !== segments.length - 1) {
+          return null;
+        }
+        var ms = multiselectSelectKeys(seg.inner);
+        if (ms.complex > 0) {
+          suppressSelect = true; // unknown source fields — $select could break it
+        }
+        ms.keys.forEach(function (key) {
+          if (selectKeys.indexOf(key) === -1) {
+            selectKeys.push(key);
+          }
+        });
+        parts.push(tokens.key(seg, false));
+      } else {
+        translating = false;
+        suppressSelect = true;
+        countable = false;
+        parts.push(seg.raw);
+        clientNote(seg.raw);
+      }
+    }
+    if (!suppressSelect) {
+      params.select = selectKeys;
+    }
+    if (clauses.length === 1) {
+      params.filter = clauses[0];
+    } else if (clauses.length > 1) {
+      params.filter = clauses
+        .map(function (clause) {
+          return '(' + clause + ')';
+        })
+        .join(' and ');
+    }
+    return { params: params, notes: notes, parts: parts, countable: countable };
+  }
+
+  function toGraphQueryJmesPath(query) {
+    var text = query.trim();
+    var count = false;
+    var lengthCall = readCall(text, 'length');
+    if (lengthCall && lengthCall.rest.trim() === '') {
+      count = true;
+      text = lengthCall.inner.trim();
+    }
+    var orderby = null;
+    var orderDesc = false;
+    var reverseCall = readCall(text, 'reverse');
+    if (reverseCall && reverseCall.rest.trim() === '' && reverseCall.inner.trim().indexOf('sort_by(') === 0) {
+      orderDesc = true;
+      text = reverseCall.inner.trim();
+    }
+    var sortCall = readCall(text, 'sort_by');
+    if (sortCall) {
+      var args = splitTopLevel(sortCall.inner, ',');
+      var fieldMatch = args.length === 2 ? /^\s*&\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/.exec(args[1]) : null;
+      if (fieldMatch) {
+        orderby = fieldMatch[1];
+        text = args[0].trim() + sortCall.rest;
+      }
+    }
+    if (orderby === null && orderDesc) {
+      return null; // reverse(sort_by(…)) we couldn't read — leave untranslated
+    }
+    var segments = scanJmesPathLoose(text);
+    if (!segments) {
+      return null;
+    }
+    var interpreted = interpretCollectionSegments(segments, {
+      pass: '[]',
+      key: function (seg, first) {
+        if (seg.type === 'multiselect') {
+          return '.' + seg.raw;
+        }
+        return (first ? '' : '.') + seg.raw;
+      }
+    });
+    if (!interpreted) {
+      return null;
+    }
+    var params = interpreted.params;
+    if (orderby) {
+      params.orderby = orderby + (orderDesc ? ' desc' : '');
+    }
+    var residual = interpreted.parts.join('');
+    if (count) {
+      if (interpreted.countable && !params.top && !params.skip) {
+        params.count = true;
+        residual = '"@odata.count"';
+      } else {
+        residual = 'length(' + residual + ')';
+      }
+    }
+    return { params: params, residual: residual, notes: interpreted.notes };
+  }
+
+  function toGraphQueryJsonPath(query) {
+    var segments = scanJsonPathLoose(query.trim());
+    if (!segments) {
+      return null;
+    }
+    var count = false;
+    var last = segments[segments.length - 1];
+    if (segments.length >= 2 && last.type === 'key' && last.name === 'length') {
+      segments.pop();
+      count = true;
+    }
+    var interpreted = interpretCollectionSegments(segments, {
+      pass: '[*]',
+      key: function (seg) {
+        return seg.raw;
+      }
+    });
+    if (!interpreted) {
+      return null;
+    }
+    var params = interpreted.params;
+    var residual = '$' + interpreted.parts.join('');
+    if (count) {
+      if (interpreted.countable && !params.top && !params.skip) {
+        params.count = true;
+        residual = "$['@odata.count']";
+      } else {
+        residual = residual + '.length';
+      }
+    }
+    return { params: params, residual: residual, notes: interpreted.notes };
+  }
+
+  /** Literal in a jq condition: "str", number, null, true/false. */
+  function parseJqLiteralText(text) {
+    var trimmed = text.trim();
+    if (trimmed === 'null') {
+      return { kind: 'null', v: null };
+    }
+    if (trimmed === 'true' || trimmed === 'false') {
+      return { kind: 'boolean', v: trimmed === 'true' };
+    }
+    var quoted = trimmed[0] === '"' ? readQuoted(trimmed, 0, '"') : null;
+    if (quoted && quoted.end === trimmed.length) {
+      return { kind: 'string', v: quoted.value };
+    }
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      return { kind: 'number', v: Number(trimmed) };
+    }
+    return null;
+  }
+
+  /** OData clause for a jq select() condition, or null. */
+  function jqConditionClause(condition) {
+    var text = condition.trim();
+    var match = /^\.([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=|<=|>=|<|>)\s*([\s\S]+)$/.exec(text);
+    if (match) {
+      var literal = parseJqLiteralText(match[3]);
+      if (!literal) {
+        return null;
+      }
+      if (literal.kind === 'null') {
+        return match[2] === '==' ? match[1] + ' eq null' : match[2] === '!=' ? match[1] + ' ne null' : null;
+      }
+      var op = ODATA_OPS[match[2]];
+      return op ? match[1] + ' ' + op + ' ' + odataLiteral(literal) : null;
+    }
+    match = /^\.([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*(startswith|endswith|contains)\(\s*("(?:\\.|[^"\\])*")\s*\)$/.exec(text);
+    if (match) {
+      var value = readQuoted(match[3], 0, '"');
+      return value ? odataFunctionClause(match[2], match[1], { kind: 'string', v: value.value }) : null;
+    }
+    match = /^\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(text);
+    if (match) {
+      return match[1] + ' ne null';
+    }
+    return null;
+  }
+
+  /** $select keys from a jq object-construction body ({a, b: .c, …}). */
+  function jqSelectKeysFromObject(inner) {
+    var keys = [];
+    var complex = 0;
+    splitTopLevel(inner, ',').forEach(function (entry) {
+      var trimmed = entry.trim();
+      var shorthand = /^([A-Za-z_][A-Za-z0-9_]*)$/.exec(trimmed);
+      if (shorthand) {
+        keys.push(shorthand[1]);
+        return;
+      }
+      var pair = /^(?:"(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*)\s*:\s*\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(trimmed);
+      if (pair) {
+        keys.push(pair[1]);
+        return;
+      }
+      complex++;
+    });
+    return { keys: keys, complex: complex };
+  }
+
+  /** Loose jq path-stage scan (raw-preserving); [] for identity `.`. */
+  function scanJqPathLoose(stage) {
+    if (stage[0] !== '.') {
+      return null;
+    }
+    var segments = [];
+    var i = 0;
+    while (i < stage.length) {
+      var ch = stage[i];
+      if (ch === '.') {
+        i++;
+        var next = stage[i];
+        if (next === undefined) {
+          break; // bare `.` — identity
+        }
+        if (next === '"') {
+          var quoted = readQuoted(stage, i, '"');
+          if (!quoted) {
+            return null;
+          }
+          segments.push({ type: 'key', name: quoted.value, raw: '.' + stage.slice(i, quoted.end) });
+          i = quoted.end;
+        } else if (/[A-Za-z_]/.test(next)) {
+          var ident = /^[A-Za-z_][A-Za-z0-9_]*/.exec(stage.slice(i))[0];
+          segments.push({ type: 'key', name: ident, raw: '.' + ident });
+          i += ident.length;
+        } else if (next === '[') {
+          continue; // `.[…]` — bracket handled below
+        } else {
+          return null;
+        }
+      } else if (ch === '[') {
+        var bracket = readBracket(stage, i);
+        if (!bracket) {
+          return null;
+        }
+        var segment = null;
+        try {
+          segment = parseBracketInner(bracket.inner, 'jq');
+        } catch (e) {
+          segment = null;
+        }
+        if (!segment || segment.type === 'key' || segment.type === 'filter') {
+          segment = { type: 'opaque' };
+        }
+        segment.raw = stage.slice(i, bracket.end);
+        segments.push(segment);
+        i = bracket.end;
+      } else {
+        return null;
+      }
+    }
+    return segments;
+  }
+
+  function toGraphQueryJq(query) {
+    var text = query.trim();
+    var wrapped = false;
+    if (text[0] === '[') {
+      var group = readBracket(text, 0);
+      if (group && group.end === text.length) {
+        wrapped = true;
+        text = group.inner.trim();
+      }
+    }
+    var stages = splitTopLevel(text, '|').map(function (stage) {
+      return stage.trim();
+    });
+    if (stages.length === 0 || stages[0] === '' || stages[0][0] !== '.') {
+      return null;
+    }
+
+    var params = { filter: null, select: [], orderby: null, top: null, skip: null, count: false };
+    var clauses = [];
+    var notes = [];
+    var residualStages = [];
+    var selectKeys = [];
+    var translating = true;
+    var suppressSelect = false;
+    var streaming = false; // pipeline is per-item after a `[]`
+    var descended = false; // descended into item properties / reshaped
+    var singleItem = false; // an index reduced the pipeline to one item
+    var sliceTranslated = false;
+    var lastTranslatedSort = false;
+
+    function clientNote(stageText) {
+      notes.push(stageText + ' stays client-side (no simple OData equivalent)');
+    }
+
+    for (var s = 0; s < stages.length; s++) {
+      var stage = stages[s];
+      if (stage === '') {
+        return null;
+      }
+      if (!translating) {
+        residualStages.push(stage);
+        continue;
+      }
+      var isLast = s === stages.length - 1;
+
+      if (stage === 'length' && isLast && s > 0) {
+        if (!streaming && !descended && !sliceTranslated && !suppressSelect && selectKeys.length === 0) {
+          params.count = true; // residual is rewritten to @odata.count below
+        } else {
+          residualStages.push(stage);
+        }
+        continue;
+      }
+
+      if (stage === 'reverse') {
+        if (lastTranslatedSort && params.orderby && params.orderby.indexOf(' desc') === -1) {
+          params.orderby += ' desc';
+        } else {
+          residualStages.push(stage);
+          translating = false;
+        }
+        continue;
+      }
+
+      // map(select(…)) / select(…) → $filter; map({…}) → $select hints.
+      var conditionText = null;
+      var objectInner = null;
+      var mapCall = readCall(stage, 'map');
+      if (mapCall && mapCall.rest.trim() === '') {
+        var mapInner = mapCall.inner.trim();
+        var selectCall = readCall(mapInner, 'select');
+        if (selectCall && selectCall.rest.trim() === '') {
+          conditionText = selectCall.inner;
+        } else if (mapInner[0] === '{') {
+          var mapGroup = readGroup(mapInner, 0, '{', '}');
+          if (mapGroup && mapGroup.end === mapInner.length) {
+            objectInner = mapGroup.inner;
+          }
+        }
+      } else {
+        var bareSelect = readCall(stage, 'select');
+        if (bareSelect && bareSelect.rest.trim() === '') {
+          conditionText = bareSelect.inner;
+        }
+      }
+      if (conditionText !== null) {
+        lastTranslatedSort = false;
+        var clause = !descended && !sliceTranslated ? jqConditionClause(conditionText) : null;
+        if (clause) {
+          clauses.push(clause); // server-side — the stage disappears
+        } else {
+          residualStages.push(stage);
+          translating = false;
+          suppressSelect = true;
+          clientNote(stage);
+        }
+        continue;
+      }
+
+      var sortCall = readCall(stage, 'sort_by');
+      if (sortCall && sortCall.rest.trim() === '') {
+        var sortField = /^\s*\.([A-Za-z_][A-Za-z0-9_]*)\s*$/.exec(sortCall.inner);
+        if (sortField && !streaming && !descended && !sliceTranslated && params.orderby === null) {
+          params.orderby = sortField[1];
+          lastTranslatedSort = true;
+        } else {
+          residualStages.push(stage);
+          translating = false;
+        }
+        continue;
+      }
+
+      if (stage[0] === '{' || objectInner !== null) {
+        lastTranslatedSort = false;
+        var objInner = objectInner;
+        if (objInner === null) {
+          var stageGroup = readGroup(stage, 0, '{', '}');
+          objInner = stageGroup && stageGroup.end === stage.length ? stageGroup.inner : null;
+        }
+        if (objInner === null) {
+          residualStages.push(stage);
+          translating = false;
+          suppressSelect = true;
+          clientNote(stage);
+          continue;
+        }
+        var objKeys = jqSelectKeysFromObject(objInner);
+        if (objKeys.complex > 0) {
+          suppressSelect = true; // unknown source fields — $select could break it
+        }
+        objKeys.keys.forEach(function (key) {
+          if (selectKeys.indexOf(key) === -1) {
+            selectKeys.push(key);
+          }
+        });
+        descended = true;
+        residualStages.push(stage); // the reshape itself stays client-side
+        continue;
+      }
+
+      if (stage[0] === '.') {
+        var segments = scanJqPathLoose(stage);
+        if (segments === null) {
+          residualStages.push(stage);
+          translating = false;
+          suppressSelect = true;
+          clientNote(stage);
+          continue;
+        }
+        lastTranslatedSort = false;
+        if (s === 0 && (segments.length === 0 || segments[0].type !== 'key' || segments[0].name !== 'value')) {
+          return null; // the pipeline must start at the value collection
+        }
+        var rebuilt = '';
+        for (var g = 0; g < segments.length; g++) {
+          var seg = segments[g];
+          if (seg.type === 'key') {
+            if (!(s === 0 && g === 0)) {
+              var onItems = streaming || singleItem || (g > 0 && segments[g - 1].type === 'wildcard');
+              if (onItems && !descended && selectKeys.length === 0 && PLAIN_IDENTIFIER.test(seg.name)) {
+                selectKeys.push(seg.name);
+              } else if (!onItems && !descended) {
+                translating = false; // .value.foo — not a collection operation
+              }
+              descended = true;
+            }
+            rebuilt += seg.raw;
+          } else if (seg.type === 'wildcard') {
+            streaming = true;
+            rebuilt += seg.raw;
+          } else if (seg.type === 'index' || seg.type === 'slice') {
+            var translated = false;
+            if (seg.type === 'index') {
+              singleItem = true; // whatever follows reads one item's properties
+            }
+            if (translating && !streaming && !descended && !sliceTranslated) {
+              if (seg.type === 'index' && seg.value >= 0) {
+                if (seg.value > 0) {
+                  params.skip = seg.value;
+                }
+                params.top = 1;
+                sliceTranslated = true;
+                rebuilt += '[0]';
+                translated = true;
+              } else if (seg.type === 'slice') {
+                var from = seg.from === '' ? 0 : parseInt(seg.from, 10);
+                var to = seg.to === '' ? null : parseInt(seg.to, 10);
+                if (from >= 0 && (to === null || to > from)) {
+                  if (from > 0) {
+                    params.skip = from;
+                  }
+                  if (to !== null) {
+                    params.top = to - from;
+                  }
+                  sliceTranslated = true;
+                  translated = true; // server returns exactly the window
+                }
+              }
+            }
+            if (!translated) {
+              translating = false;
+              rebuilt += seg.raw;
+            }
+          } else {
+            translating = false;
+            suppressSelect = true;
+            rebuilt += seg.raw;
+            clientNote(seg.raw);
+          }
+        }
+        if (rebuilt !== '') {
+          residualStages.push(rebuilt[0] === '[' ? '.' + rebuilt : rebuilt);
+        }
+        continue;
+      }
+
+      residualStages.push(stage);
+      translating = false;
+      suppressSelect = true;
+      clientNote(stage);
+    }
+
+    if (!suppressSelect) {
+      params.select = selectKeys;
+    }
+    if (clauses.length === 1) {
+      params.filter = clauses[0];
+    } else if (clauses.length > 1) {
+      params.filter = clauses
+        .map(function (clause) {
+          return '(' + clause + ')';
+        })
+        .join(' and ');
+    }
+    var residual = params.count ? '."@odata.count"' : residualStages.join(' | ');
+    if (wrapped && !params.count) {
+      residual = '[' + residual + ']';
+    }
+    return { params: params, residual: residual, notes: notes };
+  }
+
+  /**
+   * Translate a panel query into the Microsoft Graph OData query options
+   * that make the server do (part of) the work. Returns
+   * { ok: true, params, residual, notes, advanced } — `params` holds
+   * $filter/$select/$orderby/$top/$skip/$count values, `residual` is the
+   * query that must still run client-side against the new response to
+   * reproduce the original result, `notes` names the pieces that could
+   * not be translated, and `advanced` flags parameters that need the
+   * ConsistencyLevel: eventual header. When nothing can run server-side:
+   * { ok: false, reason }.
+   */
+  function toGraphQuery(language, query) {
+    if (typeof query !== 'string' || query.trim() === '') {
+      return { ok: false, reason: 'Type a query first — an empty query has nothing to translate.' };
+    }
+    var result = null;
+    try {
+      if (language === 'jsonpath') {
+        result = toGraphQueryJsonPath(query);
+      } else if (language === 'jq') {
+        result = toGraphQueryJq(query);
+      } else if (language === 'jmespath') {
+        result = toGraphQueryJmesPath(query);
+      }
+    } catch (e) {
+      result = null;
+    }
+    if (!result) {
+      return {
+        ok: false,
+        reason: 'Only queries over the value collection built from filters, field picks, sorting, slicing, and counts can be translated into Graph query options.'
+      };
+    }
+    var params = result.params;
+    var hasParams = !!(
+      params.filter ||
+      params.select.length > 0 ||
+      params.orderby ||
+      params.count ||
+      params.top !== null ||
+      params.skip !== null
+    );
+    if (!hasParams) {
+      return { ok: false, reason: 'This query has no server-side part — it only reshapes what the server already returns.' };
+    }
+    return {
+      ok: true,
+      params: params,
+      residual: result.residual,
+      notes: result.notes,
+      advanced: !!(params.filter || params.orderby || params.count)
+    };
+  }
+
+  /**
+   * Merge translated OData params into a captured Graph request URL.
+   * Existing $filter is combined with `and`; other overlapping options
+   * are replaced (each replacement is reported in `notes`); unrelated
+   * parameters are kept. Returns { url, notes } or null when sourceUrl
+   * is not a parseable URL. Values stay readable (only characters that
+   * would break parameter parsing are escaped).
+   */
+  function graphQueryUrl(sourceUrl, params) {
+    var parsed;
+    try {
+      parsed = new URL(sourceUrl);
+    } catch (e) {
+      return null;
+    }
+    var kept = [];
+    var existingFilter = null;
+    var notes = [];
+    parsed.searchParams.forEach(function (value, key) {
+      var k = key.toLowerCase();
+      if (k === '$filter' && params.filter) {
+        existingFilter = value;
+        return;
+      }
+      if (
+        (k === '$select' && params.select.length > 0) ||
+        (k === '$orderby' && params.orderby) ||
+        (k === '$top' && params.top !== null) ||
+        (k === '$skip' && params.skip !== null) ||
+        (k === '$count' && params.count)
+      ) {
+        notes.push('replaces the request’s existing ' + key);
+        return;
+      }
+      kept.push([key, value]);
+    });
+    var filter = params.filter || null;
+    if (existingFilter) {
+      filter = '(' + existingFilter + ') and (' + filter + ')';
+      notes.push('combined with the request’s existing $filter');
+    }
+    var pairs = kept;
+    if (filter) {
+      pairs.push(['$filter', filter]);
+    }
+    if (params.select.length > 0) {
+      pairs.push(['$select', params.select.join(',')]);
+    }
+    if (params.orderby) {
+      pairs.push(['$orderby', params.orderby]);
+    }
+    if (params.skip !== null && params.skip !== undefined) {
+      pairs.push(['$skip', String(params.skip)]);
+    }
+    if (params.top !== null && params.top !== undefined) {
+      pairs.push(['$top', String(params.top)]);
+    }
+    if (params.count) {
+      pairs.push(['$count', 'true']);
+    }
+    var query = pairs
+      .map(function (pair) {
+        var value = String(pair[1])
+          .replace(/%/g, '%25')
+          .replace(/&/g, '%26')
+          .replace(/\+/g, '%2B')
+          .replace(/#/g, '%23');
+        return pair[0] + '=' + value;
+      })
+      .join('&');
+    return { url: parsed.origin + parsed.pathname + (query ? '?' + query : ''), notes: notes };
+  }
+
   // Graph Explorer's own AAD client id — its permission-management
   // requests (oauth2PermissionGrants, servicePrincipals) embed it.
   var GRAPH_EXPLORER_CLIENT_ID = 'de8bc8b5-d9f9-48b1-a8ad-b748da725064';
@@ -1750,10 +2931,13 @@
    * get `$count=true` appended (when missing) and the header added.
    * Everything else passes through untouched.
    *
-   * Returns { url, addHeader } — url is possibly rewritten.
+   * Returns { url, addHeader, addCount } — url is possibly rewritten;
+   * addCount is true only when `$count=true` was actually appended (a
+   * `/$count` path segment needs the header but must NOT get the query
+   * parameter — callers must key their own insertion off addCount).
    */
   function applyAdvancedQuery(url, method) {
-    var unchanged = { url: url, addHeader: false };
+    var unchanged = { url: url, addHeader: false, addCount: false };
     if (String(method || 'GET').toUpperCase() !== 'GET') {
       return unchanged;
     }
@@ -1765,7 +2949,7 @@
     }
     // `GET /users/$count` style requests also need the header.
     if (/\/\$count$/i.test(parsed.pathname)) {
-      return { url: url, addHeader: true };
+      return { url: url, addHeader: true, addCount: false };
     }
     var hasTrigger = false;
     var hasCount = false;
@@ -1784,7 +2968,7 @@
     if (!hasCount) {
       parsed.searchParams.append('$count', 'true');
     }
-    return { url: parsed.href, addHeader: true };
+    return { url: parsed.href, addHeader: true, addCount: !hasCount };
   }
 
   /**
@@ -2064,6 +3248,12 @@
     jsonPathKey: jsonPathKey,
     jqKey: jqKey,
     clampInt: clampInt,
+    stringifyLimited: stringifyLimited,
+    trimResponses: trimResponses,
+    DEFAULT_SETTINGS: DEFAULT_SETTINGS,
+    normalizeSettings: normalizeSettings,
+    toGraphQuery: toGraphQuery,
+    graphQueryUrl: graphQueryUrl,
     convertQuery: convertQuery,
     queryCompletions: queryCompletions,
     isBackgroundGraphRequest: isBackgroundGraphRequest,

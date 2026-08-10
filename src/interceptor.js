@@ -23,7 +23,7 @@
 
   var MESSAGE_SOURCE = 'gejq-interceptor';
   var SETTINGS_SOURCE = 'gejq-settings';
-  var CANCEL_SOURCE = 'gejq-cancel-autofetch';
+  var CONTROL_SOURCE = 'gejq-autofetch-control';
   var MAX_BODY_CHARS = 10 * 1024 * 1024; // 10 MB of JSON text is plenty
   var MAX_REQUEST_BODY_CHARS = 100 * 1024; // captured request bodies
   var GRAPH_HOSTS = [
@@ -36,15 +36,16 @@
 
   var idCounter = 0;
 
-  // Defaults match the extension's stored defaults; the content script
-  // pushes the user's actual settings in shortly after page load.
+  // Deliberately conservative until told otherwise: the extension's
+  // stored default for auto-fetch is ON, but this MAIN-world script keeps
+  // it OFF until the content script pushes the user's actual settings in
+  // shortly after page load — so no extra requests ever fire for a user
+  // who turned the feature off.
   var settings = {
     autoFetchNextLink: false,
     autoFetchMaxPages: 50,
     autoFetchMaxChars: 10 * 1024 * 1024
   };
-
-  var autoFetchCancelled = false;
 
   window.addEventListener('message', function (event) {
     if (event.source !== window || event.origin !== window.location.origin) {
@@ -55,9 +56,17 @@
       settings.autoFetchNextLink = data.settings.autoFetchNextLink === true;
       settings.autoFetchMaxPages = GEJQ.clampInt(data.settings.autoFetchMaxPages, 1, 1000, 50);
       settings.autoFetchMaxChars = GEJQ.clampInt(data.settings.autoFetchMaxChars, 1, 50 * 1024 * 1024, 10 * 1024 * 1024);
+      if (!settings.autoFetchNextLink && activeFetch && activeFetch.state !== 'done') {
+        // Turning the setting off also stops a chain already in flight.
+        if (activeFetch.state === 'paused') {
+          finalizeChain(activeFetch, activeFetch.nextUrl, 'stopped');
+        } else {
+          activeFetch.stopRequested = true;
+        }
+      }
     }
-    if (data && data.source === CANCEL_SOURCE) {
-      autoFetchCancelled = true;
+    if (data && data.source === CONTROL_SOURCE && typeof data.action === 'string') {
+      handleAutoFetchControl(data.action);
     }
   });
 
@@ -153,16 +162,209 @@
   // -------------------------------------------------- @odata.nextLink pages
 
   /**
-   * When the auto-fetch setting is on and a captured GET response is
-   * paged, follow the @odata.nextLink chain (replaying the original
-   * request's own headers, so authentication keeps working), merge all
-   * `value` arrays, and post the combined dataset as an extra entry
-   * marked with the number of pages fetched. Fetching stops at the
-   * configured page-count or data-size limit; if a nextLink remains at
-   * that point the entry is flagged `truncated` (and keeps the leftover
-   * @odata.nextLink) so the panel can warn that the dataset is
-   * incomplete.
+   * Auto-fetch controller. When the setting is on and a captured GET
+   * response is paged, follow the @odata.nextLink chain (replaying the
+   * original request's own headers, so authentication keeps working),
+   * merge all `value` arrays, and post the combined dataset as one extra
+   * entry. The entry id stays stable across posts, so later posts update
+   * the same entry in place instead of adding new ones.
+   *
+   * The chain is interactive: the panel pauses, resumes, steps (one page
+   * at a time), or stops it via gejq-autofetch-control messages. The
+   * configured page/size limits are checkpoints, not hard stops — when
+   * one is reached the chain pauses, and Resume/Step continue past it
+   * (each resume grants another full page/size budget). A chain only
+   * finishes when the links run out, the user stops it, or a page fetch
+   * fails; incomplete datasets are flagged `truncated` with a
+   * `stopReason` ('stopped' | 'error') so the panel can say honestly why
+   * — a user stop is never reported as a limit.
    */
+  var activeFetch = null;
+
+  function postProgress(chain, state, reason) {
+    postTyped('graph-fetch-progress', {
+      url: chain.url,
+      pages: chain.pages,
+      items: chain.combinedValue.length,
+      size: chain.totalSize,
+      state: state,
+      reason: reason || null
+    });
+  }
+
+  /** Post the chain's combined dataset (same entry id every time). */
+  function postChainEntry(chain, remainingNextLink, flags) {
+    if (chain.pages < 2) {
+      return; // nothing beyond the original response — no entry to add
+    }
+    var combined = {};
+    for (var key in chain.firstJson) {
+      if (Object.prototype.hasOwnProperty.call(chain.firstJson, key) && key !== '@odata.nextLink') {
+        combined[key] = chain.firstJson[key];
+      }
+    }
+    if (remainingNextLink) {
+      combined['@odata.nextLink'] = remainingNextLink;
+    }
+    combined.value = chain.combinedValue;
+    var entry = {
+      id: chain.id,
+      method: chain.method,
+      url: chain.url,
+      status: chain.status,
+      timestamp: Date.now(),
+      json: combined,
+      size: chain.totalSize,
+      pages: chain.pages,
+      partial: flags.partial === true,
+      truncated: flags.truncated === true
+    };
+    if (flags.stopReason) {
+      entry.stopReason = flags.stopReason;
+    }
+    if (chain.requestHeaders) {
+      entry.requestHeaders = chain.requestHeaders;
+    }
+    post(entry);
+  }
+
+  function pauseChain(chain, reason) {
+    chain.state = 'paused';
+    chain.pausedReason = reason;
+    postChainEntry(chain, chain.nextUrl, { partial: true });
+    postProgress(chain, 'paused', reason);
+  }
+
+  /** End the chain. No stopReason = the links simply ran out. */
+  function finalizeChain(chain, remainingNextLink, stopReason) {
+    if (chain.state === 'done') {
+      return;
+    }
+    chain.state = 'done';
+    postChainEntry(chain, remainingNextLink || null, {
+      truncated: !!remainingNextLink,
+      stopReason: remainingNextLink ? stopReason || 'stopped' : undefined
+    });
+    postProgress(chain, 'done', stopReason || null);
+    if (activeFetch === chain) {
+      activeFetch = null;
+    }
+  }
+
+  function continueChain(chain) {
+    var nextUrl = chain.nextUrl;
+    chain.nextUrl = null;
+    var parsed;
+    try {
+      parsed = new URL(nextUrl);
+    } catch (e) {
+      finalizeChain(chain, null); // unusable link — the chain is complete
+      return;
+    }
+    if (!isGraphHost(parsed.hostname)) {
+      finalizeChain(chain, null);
+      return;
+    }
+    if (chain.stopRequested) {
+      finalizeChain(chain, nextUrl, 'stopped');
+      return;
+    }
+    if (chain.pauseRequested) {
+      chain.pauseRequested = false;
+      chain.nextUrl = nextUrl;
+      pauseChain(chain, 'user');
+      return;
+    }
+    if (chain.pages >= chain.pageBudget) {
+      chain.nextUrl = nextUrl;
+      pauseChain(chain, 'page-limit');
+      return;
+    }
+    if (chain.totalSize > chain.sizeBudget) {
+      chain.nextUrl = nextUrl;
+      pauseChain(chain, 'size-limit');
+      return;
+    }
+    postProgress(chain, 'running');
+    originalFetch(nextUrl, { headers: chain.headers })
+      .then(function (response) {
+        if (!response.ok) {
+          finalizeChain(chain, nextUrl, 'error');
+          return;
+        }
+        response
+          .text()
+          .then(function (text) {
+            var pageJson;
+            try {
+              pageJson = JSON.parse(text);
+            } catch (e) {
+              finalizeChain(chain, nextUrl, 'error');
+              return;
+            }
+            if (!pageJson || !Array.isArray(pageJson.value)) {
+              finalizeChain(chain, nextUrl, 'error');
+              return;
+            }
+            chain.totalSize += text.length;
+            chain.combinedValue = chain.combinedValue.concat(pageJson.value);
+            chain.pages += 1;
+            var next = pageJson['@odata.nextLink'];
+            if (typeof next !== 'string') {
+              finalizeChain(chain, null); // all pages fetched
+              return;
+            }
+            chain.nextUrl = next;
+            if (chain.stopRequested) {
+              finalizeChain(chain, next, 'stopped');
+            } else if (chain.stepping) {
+              chain.stepping = false;
+              pauseChain(chain, 'step');
+            } else if (chain.pauseRequested) {
+              chain.pauseRequested = false;
+              pauseChain(chain, 'user');
+            } else {
+              continueChain(chain);
+            }
+          })
+          .catch(function () {
+            finalizeChain(chain, nextUrl, 'error');
+          });
+      })
+      .catch(function () {
+        finalizeChain(chain, nextUrl, 'error');
+      });
+  }
+
+  function handleAutoFetchControl(action) {
+    var chain = activeFetch;
+    if (!chain || chain.state === 'done') {
+      return;
+    }
+    if (action === 'pause' && chain.state === 'running') {
+      chain.pauseRequested = true; // takes effect after the in-flight page
+    } else if (action === 'resume' && chain.state === 'paused' && chain.nextUrl) {
+      // Each resume grants a fresh budget, so a chain paused at a limit
+      // can keep going as far as the user wants.
+      chain.pageBudget = chain.pages + settings.autoFetchMaxPages;
+      chain.sizeBudget = chain.totalSize + settings.autoFetchMaxChars;
+      chain.state = 'running';
+      continueChain(chain);
+    } else if (action === 'step' && chain.state === 'paused' && chain.nextUrl) {
+      chain.stepping = true;
+      chain.pageBudget = Math.max(chain.pageBudget, chain.pages + 1);
+      chain.sizeBudget = Math.max(chain.sizeBudget, chain.totalSize + settings.autoFetchMaxChars);
+      chain.state = 'running';
+      continueChain(chain);
+    } else if (action === 'stop') {
+      if (chain.state === 'paused') {
+        finalizeChain(chain, chain.nextUrl, 'stopped');
+      } else {
+        chain.stopRequested = true;
+      }
+    }
+  }
+
   function maybeAutoFetchAllPages(firstEntry, headers, method) {
     if (!settings.autoFetchNextLink || String(method || 'GET').toUpperCase() !== 'GET') {
       return;
@@ -174,116 +376,32 @@
     if (typeof firstJson['@odata.nextLink'] !== 'string') {
       return;
     }
-    var combinedValue = firstJson.value.slice();
-    var pages = 1;
-    var totalSize = firstEntry.size || 0;
-    autoFetchCancelled = false;
-
-    function progress(done) {
-      postTyped('graph-fetch-progress', {
-        url: firstEntry.url,
-        pages: pages,
-        items: combinedValue.length,
-        size: totalSize,
-        done: done === true
-      });
+    if (activeFetch && activeFetch.state !== 'done') {
+      // A newer query supersedes a chain still running or paused.
+      finalizeChain(activeFetch, activeFetch.nextUrl, 'stopped');
     }
-
-    /** remainingNextLink is set when limits (or a fetch error) stopped
-     *  the chain while more data was still available. */
-    function finish(remainingNextLink) {
-      if (pages < 2 && !remainingNextLink) {
-        return; // chain completed on page 1 — the original entry suffices
-      }
-      var combined = {};
-      for (var key in firstJson) {
-        if (Object.prototype.hasOwnProperty.call(firstJson, key) && key !== '@odata.nextLink') {
-          combined[key] = firstJson[key];
-        }
-      }
-      if (remainingNextLink) {
-        combined['@odata.nextLink'] = remainingNextLink;
-      }
-      combined.value = combinedValue;
-      var entry = makeEntry(method, firstEntry.url, firstEntry.status);
-      entry.json = combined;
-      entry.size = totalSize;
-      entry.pages = pages;
-      entry.truncated = !!remainingNextLink;
-      if (firstEntry.requestHeaders) {
-        entry.requestHeaders = firstEntry.requestHeaders;
-      }
-      post(entry);
-    }
-
-    function step(nextUrl) {
-      var parsed;
-      try {
-        parsed = new URL(nextUrl);
-      } catch (e) {
-        finish();
-        progress(true);
-        return;
-      }
-      if (!isGraphHost(parsed.hostname)) {
-        finish();
-        progress(true);
-        return;
-      }
-      if (autoFetchCancelled || pages >= settings.autoFetchMaxPages || totalSize > settings.autoFetchMaxChars) {
-        finish(nextUrl);
-        progress(true);
-        return;
-      }
-      progress(false);
-      originalFetch(nextUrl, { headers: headers })
-        .then(function (response) {
-          if (!response.ok) {
-            finish(nextUrl);
-            return;
-          }
-          response
-            .text()
-            .then(function (text) {
-              var pageJson;
-              try {
-                pageJson = JSON.parse(text);
-              } catch (e) {
-                finish(nextUrl);
-                return;
-              }
-              if (!pageJson || !Array.isArray(pageJson.value)) {
-                finish(nextUrl);
-                return;
-              }
-              totalSize += text.length;
-              combinedValue = combinedValue.concat(pageJson.value);
-              pages += 1;
-              var next = pageJson['@odata.nextLink'];
-              if (typeof next !== 'string') {
-                finish();
-                progress(true);
-              } else if (totalSize > settings.autoFetchMaxChars) {
-                // Checked after accumulating too, so the size limit is a
-                // hard ceiling rather than "limit plus one page".
-                finish(next);
-                progress(true);
-              } else {
-                step(next);
-              }
-            })
-            .catch(function () {
-              finish(nextUrl);
-              progress(true);
-            });
-        })
-        .catch(function () {
-          finish(nextUrl);
-          progress(true);
-        });
-    }
-
-    step(firstJson['@odata.nextLink']);
+    idCounter += 1;
+    activeFetch = {
+      id: Date.now() + '-' + idCounter + '-pages',
+      method: String(method || 'GET').toUpperCase(),
+      url: firstEntry.url,
+      status: firstEntry.status,
+      requestHeaders: firstEntry.requestHeaders || null,
+      headers: headers,
+      firstJson: firstJson,
+      combinedValue: firstJson.value.slice(),
+      pages: 1,
+      totalSize: firstEntry.size || 0,
+      nextUrl: firstJson['@odata.nextLink'],
+      state: 'running',
+      pageBudget: settings.autoFetchMaxPages,
+      sizeBudget: settings.autoFetchMaxChars,
+      stepping: false,
+      pauseRequested: false,
+      stopRequested: false,
+      pausedReason: null
+    };
+    continueChain(activeFetch);
   }
 
   /** Best-effort view of the headers a fetch call is about to send. */
