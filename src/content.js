@@ -1489,18 +1489,15 @@
           6,
           function (addButton) {
             addButton.click();
-            // Only mark done once the row is verified in the panel.
-            waitForCondition(
-              function () {
-                return panelRoot && panelRoot.textContent.indexOf(row.name) !== -1 ? true : null;
-              },
-              6,
-              function () {
-                markHeaderAdded(row.name);
-                addNext(index + 1);
-              },
-              finish
-            );
+            // Mark as added right after the click (the button was enabled,
+            // so the row is being added). Graph Explorer renders added rows
+            // outside this input's container, so a DOM re-check here gives
+            // false negatives — which previously left the session guard
+            // unset and re-added ConsistencyLevel on every query edit.
+            markHeaderAdded(row.name);
+            setTimeout(function () {
+              addNext(index + 1);
+            }, 120);
           },
           finish
         );
