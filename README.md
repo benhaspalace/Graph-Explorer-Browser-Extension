@@ -78,8 +78,13 @@ status for this branch.
   The configured page-count and data-size limits (defaults: 50 pages /
   10 MB) are checkpoints, not hard stops: reaching one pauses the chain,
   and Resume or +1 continue past it — each Resume grants a fresh budget.
-  Once a chain ends, the same spot reads "auto-fetched · N pages", with
-  "(incomplete)" when it was closed out early or a page failed. The
+  While a chain is running, query editing and result refreshes are on
+  hold (the editor grays out): evaluating against a continuously growing
+  dataset would freeze the panel, so the query re-runs exactly once
+  against the settled data at each pause — hit ⏸ any time to edit
+  mid-way. Once a chain ends, the same spot reads "auto-fetched · N
+  pages", with "(incomplete)" when it was closed out early or a page
+  failed. The
   extension replays the original request's own headers for the follow-up
   pages; nothing is stored. Toggle the feature from the ⟳ button next to
   the response list or in the settings.

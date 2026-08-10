@@ -570,6 +570,13 @@
   font-size: 11px;
 }
 
+/* Query editor grayed out while auto-fetch is running (evaluating against
+   the continuously growing dataset would freeze the panel). */
+.gejq-query-locked {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ------------------------------------------------------------------ table */
 
 .gejq-table-scroll {

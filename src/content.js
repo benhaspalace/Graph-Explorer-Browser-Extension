@@ -117,6 +117,8 @@
   var lastRunDurationMs = 0; // how long the last scheduled evaluation took
   var autocomplete = { open: false, result: null, activeIndex: 0 }; // query-input completion state
   var fetchProgress = null; // latest auto-fetch progress payload (null = idle)
+  var pendingRun = false; // a refresh was requested while auto-fetch was running
+  var queryEditingLocked = false; // editor grayed out while auto-fetch runs
   var suggestionsCache = { key: '', json: undefined }; // skips redundant re-renders
   var limitedCache = { value: null, limited: null }; // serialized preview per result
 
@@ -606,7 +608,21 @@
     ui.meta.textContent = text;
   }
 
+  /** True while an auto-fetch chain is actively pulling pages. */
+  function fetchRunning() {
+    return !!(fetchProgress && fetchProgress.state === 'running');
+  }
+
   function runQuery() {
+    // While auto-fetch is running the dataset grows continuously and the
+    // main thread is busy with page work — evaluating the query then
+    // (and re-walking an ever larger result) is what froze the panel.
+    // Defer every refresh until the chain pauses or finishes; the panel
+    // then renders exactly once against the settled data.
+    if (fetchRunning()) {
+      pendingRun = true;
+      return;
+    }
     var response = selectedResponse();
     updateResponseInfo(response);
     syncTheme();
@@ -776,6 +792,9 @@
 
   /** The current result in the selected export format, or null. */
   function exportPayload() {
+    if (fetchRunning()) {
+      return null; // no evaluation while auto-fetch is running
+    }
     if (state.diff.active) {
       if (state.diffText === '') {
         return null;
@@ -1095,6 +1114,9 @@
 
   /** Feed the current query result back in as a new queryable source. */
   function pinCurrentResult() {
+    if (fetchRunning()) {
+      return; // no evaluation while auto-fetch is running
+    }
     var outcome = currentOutcome();
     if (outcome.error || outcome.value === undefined) {
       return;
@@ -1412,7 +1434,8 @@
     var metrics =
       fetchProgress.pages + ' pages · ' + fetchProgress.items + ' items · ' + GEJQ.formatBytes(fetchProgress.size);
     if (fetchProgress.state === 'running') {
-      fetchStatusView.text.textContent = (fetchStatusView.pausePending ? 'Pausing… ' : 'Auto-fetching… ') + metrics;
+      fetchStatusView.text.textContent =
+        (fetchStatusView.pausePending ? 'Pausing… ' : 'Auto-fetching… ') + metrics + ' · editing paused';
     } else {
       var reason =
         fetchProgress.reason === 'page-limit'
@@ -1949,6 +1972,9 @@
    * last used and which Graph request it ran against.
    */
   function recordQuery() {
+    if (fetchRunning()) {
+      return; // no evaluation while auto-fetch is running
+    }
     var query = state.query.trim();
     if (query === '') {
       return;
@@ -2554,6 +2580,7 @@
     next.setPlaceholder(LANGUAGES[state.settings.queryLanguage].placeholder);
     next.setValue(current);
     closeAutocomplete();
+    applyFetchLock(true); // the fresh editor must pick up an active lock
   }
 
   function textareaEditor(handlers) {
@@ -2586,6 +2613,9 @@
         input.placeholder = text;
       },
       setLanguage: function () {},
+      setEnabled: function (enabled) {
+        input.disabled = !enabled;
+      },
       destroy: function () {}
     };
   }
@@ -2596,6 +2626,7 @@
     var programmatic = false;
     var languageCompartment = new cm.Compartment();
     var placeholderCompartment = new cm.Compartment();
+    var editableCompartment = new cm.Compartment();
     // Colors come from CSS variables so the editor follows the panel theme.
     var highlightStyle = cm.HighlightStyle.define([
       { tag: cm.tags.string, color: 'var(--gejq-tok-string)' },
@@ -2632,6 +2663,7 @@
           cm.syntaxHighlighting(highlightStyle),
           languageCompartment.of(streamLanguage(state.settings.queryLanguage)),
           placeholderCompartment.of(cm.placeholder('')),
+          editableCompartment.of(cm.EditorView.editable.of(true)),
           cm.EditorView.lineWrapping,
           cm.EditorView.domEventHandlers({
             keydown: function (event) {
@@ -2695,6 +2727,9 @@
       },
       setLanguage: function (languageKey) {
         view.dispatch({ effects: languageCompartment.reconfigure(streamLanguage(languageKey)) });
+      },
+      setEnabled: function (enabled) {
+        view.dispatch({ effects: editableCompartment.reconfigure(cm.EditorView.editable.of(enabled === true)) });
       },
       destroy: function () {
         view.destroy();
@@ -3262,6 +3297,34 @@
     // The live progress and the "auto-fetched · N pages" label share the
     // left slot — swap the label in the moment the progress line clears.
     updateAutoFetchedMeta();
+    applyFetchLock();
+    if (!fetchRunning() && pendingRun) {
+      // Refreshes requested while the chain was running land now, once.
+      pendingRun = false;
+      scheduleRun();
+    }
+  }
+
+  /**
+   * Gray out the query editor while auto-fetch is actively running:
+   * every edit would evaluate against the continuously growing dataset
+   * and freeze the panel. Pausing the fetch (⏸) re-enables editing.
+   */
+  function applyFetchLock(force) {
+    if (!ui) {
+      return;
+    }
+    var locked = fetchRunning();
+    if (!force && locked === queryEditingLocked) {
+      return;
+    }
+    queryEditingLocked = locked;
+    ui.queryEditor.setEnabled(!locked);
+    ui.queryInput.classList.toggle('gejq-query-locked', locked);
+    ui.queryInput.title = locked ? 'Query editing is paused while auto-fetch is running — pause the fetch (⏸) to edit' : '';
+    if (locked) {
+      closeAutocomplete();
+    }
   }
 
   function init() {

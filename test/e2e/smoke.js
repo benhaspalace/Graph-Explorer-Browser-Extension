@@ -701,15 +701,26 @@ function check(name, ok, extra) {
     runningControls.buttons.join('') === '⏸' && runningControls.links === 0,
     JSON.stringify(runningControls)
   );
-  // Editing the query while pages are in flight must keep working — and
-  // must not wedge the pause control (regression: typing mid-fetch froze
-  // both the editor and the fetch controls).
-  await query.fill('$.value[*].displayName');
-  await page.waitForTimeout(300);
+  // While pages are in flight the query editor is grayed out and the
+  // result view does not refresh — evaluating against the continuously
+  // growing dataset is what froze the panel (regression). Pausing the
+  // fetch re-enables both.
+  const lockedState = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const input = shadow.querySelector('.gejq-query-input');
+    const cmContent = input.querySelector('.cm-content');
+    return {
+      lockedClass: input.classList.contains('gejq-query-locked'),
+      editable: cmContent ? cmContent.getAttribute('contenteditable') : String(!input.disabled),
+      statusText: shadow.querySelector('.gejq-fetch-status').textContent
+    };
+  });
   check(
-    'query edits evaluate while pages are in flight',
-    (await page.locator('.gejq-result').innerText()).includes('Adele Vance')
+    'query editor grayed out while fetching',
+    lockedState.lockedClass && lockedState.editable === 'false',
+    JSON.stringify(lockedState)
   );
+  check('status line says editing is paused', lockedState.statusText.includes('editing paused'), lockedState.statusText);
   await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     Array.from(shadow.querySelectorAll('.gejq-fetch-status .gejq-fetch-btn'))
@@ -732,6 +743,22 @@ function check(name, ok, extra) {
       () => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-fetch-status').textContent
     ));
   }
+  // Once paused, the editor unlocks and edits evaluate again.
+  check(
+    'editor unlocked once paused',
+    await page.evaluate(() => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const input = shadow.querySelector('.gejq-query-input');
+      const cmContent = input.querySelector('.cm-content');
+      return !input.classList.contains('gejq-query-locked') && (!cmContent || cmContent.getAttribute('contenteditable') === 'true');
+    })
+  );
+  await query.fill('$.value[*].displayName');
+  await page.waitForTimeout(400);
+  check(
+    'query edits evaluate once paused',
+    (await page.locator('.gejq-result').innerText()).includes('Adele Vance')
+  );
   // Resume re-fetches the aborted page and completes all three pages.
   await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
