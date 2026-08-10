@@ -166,12 +166,13 @@
       return;
     }
     // Large result: only render-ready artifacts cross the thread boundary.
+    var previewLimit = typeof data.previewLimit === 'number' && data.previewLimit > 0 ? data.previewLimit : Infinity;
     reply({
       type: 'gejq-result',
       requestId: data.requestId,
       ok: true,
       large: {
-        preview: limited.text,
+        preview: limited.text.length > previewLimit ? limited.text.slice(0, previewLimit) : limited.text,
         size: limited.length,
         overflow: limited.overflow,
         describe: GEJQ.describeResult(value),

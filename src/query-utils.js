@@ -328,13 +328,16 @@
   var DEFAULT_SETTINGS = Object.freeze({
     advancedQuery: true,
     autoSignIn: true,
-    autoFetchNextLink: true,
+    // Paged responses always get on-demand fetch controls (▶/+1); this
+    // only decides whether the chain starts by itself. Manual by default.
+    autoFetchNextLink: false,
     autoFetchMaxPages: 50,
     autoFetchMaxMb: 10,
     queryLanguage: 'jmespath',
     historyLimit: 50, // 0 = unlimited
     showBackgroundRequests: false,
-    richEditor: true // CodeMirror editor by default; can fall back to a plain textarea
+    richEditor: true, // CodeMirror editor by default; can fall back to a plain textarea
+    autoEvaluate: true // evaluate while typing; false = only on Enter (big data)
   });
 
   /** A raw stored settings object → complete, validated settings. */
@@ -346,14 +349,15 @@
     return {
       advancedQuery: !raw || raw.advancedQuery !== false,
       autoSignIn: !raw || raw.autoSignIn !== false,
-      autoFetchNextLink: !raw || raw.autoFetchNextLink !== false,
+      autoFetchNextLink: !!raw && raw.autoFetchNextLink === true,
       autoFetchMaxPages: clampInt(raw && raw.autoFetchMaxPages, 1, 1000, DEFAULT_SETTINGS.autoFetchMaxPages),
       autoFetchMaxMb: clampInt(raw && raw.autoFetchMaxMb, 1, 50, DEFAULT_SETTINGS.autoFetchMaxMb),
       queryLanguage:
         raw && VALID_LANGUAGES.indexOf(raw.queryLanguage) !== -1 ? raw.queryLanguage : DEFAULT_SETTINGS.queryLanguage,
       historyLimit: historyLimit,
       showBackgroundRequests: !!raw && raw.showBackgroundRequests === true,
-      richEditor: !raw || raw.richEditor !== false
+      richEditor: !raw || raw.richEditor !== false,
+      autoEvaluate: !raw || raw.autoEvaluate !== false
     };
   }
 
@@ -1031,7 +1035,10 @@
     var base = null;
     var fragment = '';
     if (language === 'jmespath') {
-      match = /([A-Za-z_][\w."\[\]]*)\[\?\s*([A-Za-z_]\w*)?$/.exec(textBeforeCursor);
+      // Bare field (`value[?dis`) and fields inside filter function calls
+      // (`value[?contains(dis`, nested calls included) both complete with
+      // the filtered array's item keys.
+      match = /([A-Za-z_][\w."\[\]]*)\[\?\s*(?:!?\s*[A-Za-z_]\w*\(\s*)*([A-Za-z_]\w*)?$/.exec(textBeforeCursor);
       if (!match) {
         return null;
       }

@@ -1192,3 +1192,25 @@ test('sampleJson prunes arrays, keys, depth, and long strings', () => {
   assert.equal(GEJQ.sampleJson(42), 42);
   assert.equal(GEJQ.sampleJson(null), null);
 });
+
+test('normalizeSettings covers the auto-evaluate toggle', () => {
+  assert.equal(GEJQ.normalizeSettings(null).autoEvaluate, true);
+  assert.equal(GEJQ.normalizeSettings({ autoEvaluate: false }).autoEvaluate, false);
+  assert.equal(GEJQ.normalizeSettings({ autoEvaluate: 'yes' }).autoEvaluate, true);
+});
+
+test('property completions work inside filter function calls', () => {
+  const json = { value: [{ displayName: 'Adele', mail: 'a@x', jobTitle: 'Auditor' }] };
+  const empty = GEJQ.queryCompletions('jmespath', 'value[?contains(', json);
+  assert.ok(empty && empty.items.some((i) => i.label === 'displayName'), JSON.stringify(empty));
+  const frag = GEJQ.queryCompletions('jmespath', 'value[?contains(dis', json);
+  assert.ok(frag.items.some((i) => i.label === 'displayName'));
+  assert.equal(frag.replaceFrom, 'value[?contains('.length);
+  const nested = GEJQ.queryCompletions('jmespath', 'value[?starts_with(to_string(job', json);
+  assert.ok(nested.items.some((i) => i.label === 'jobTitle'));
+  // Bare filter fields keep completing as before.
+  const bare = GEJQ.queryCompletions('jmespath', 'value[?dis', json);
+  assert.ok(bare.items.some((i) => i.label === 'displayName'));
+  // Inside a string literal, nothing pops.
+  assert.equal(GEJQ.queryCompletions('jmespath', "value[?contains(displayName, 'Ad", json), null);
+});

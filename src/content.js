@@ -28,6 +28,7 @@
   var RENDER_LIMIT = 2000000; // chars of JSON to render at all
   var STORAGE_KEY_QUERY = 'gejq.lastQuery';
   var STORAGE_KEY_COLLAPSED = 'gejq.embedCollapsed';
+  var STORAGE_KEY_FLOAT = 'gejq.forceFloat';
   var STORAGE_KEY_FORMAT = 'gejq.exportFormat';
   var STORAGE_KEY_COPY_FORMAT = 'gejq.copyFormat';
   var STORAGE_KEY_SPLIT = 'gejq.splitPct';
@@ -89,6 +90,7 @@
     followLatest: true,
     query: '',
     embedded: false, // panel currently lives inside #response-area
+    forceFloat: false, // ⧉: broken out into the side panel by choice (persisted)
     open: false, // panel visible (embedded: expanded; floating: drawer open)
     collapsedPref: false, // user preference: keep the embedded panel hidden
     format: 'json', // result view + export format: 'json' | 'csv' | 'tree'
@@ -127,6 +129,11 @@
   // combinatorially. Past this ceiling the size shows as "≥ …" instead
   // of the walk hanging the tab.
   var RENDER_SIZE_CEILING = 256 * 1024 * 1024;
+
+  // Preview text rendered for LARGE (evaluator-side) results. Kept well
+  // below RENDER_LIMIT: this text is re-laid-out on every evaluation, and
+  // rendering a 2 MB <pre> per keystroke was itself a source of jank.
+  var PREVIEW_LIMIT = 256 * 1024;
 
   // ---------------------------------------------------------------- storage
 
@@ -703,6 +710,7 @@
       language: state.settings.queryLanguage,
       query: state.query.trim(),
       valueLimit: RENDER_LIMIT,
+      previewLimit: PREVIEW_LIMIT,
       sizeCeiling: RENDER_SIZE_CEILING,
       sort: state.tableSort.column === null ? null : state.tableSort
     });
@@ -1323,8 +1331,9 @@
     var on = state.settings.autoFetchNextLink;
     ui.autoFetchToggle.classList.toggle('gejq-tag-active', on);
     ui.autoFetchToggle.setAttribute('aria-pressed', on ? 'true' : 'false');
-    ui.autoFetchToggle.title =
-      'Auto-fetch all pages (@odata.nextLink): ' + (on ? 'on' : 'off') + ' — click to turn ' + (on ? 'off' : 'on');
+    ui.autoFetchToggle.title = on
+      ? 'Auto-fetch all pages: on — paged responses fetch automatically (click for on-demand ▶/+1 instead)'
+      : 'Auto-fetch all pages: off — fetch on demand with ▶/+1 on the metrics row (click to fetch automatically)';
     ui.autoFetchToggle.setAttribute('aria-label', ui.autoFetchToggle.title);
   }
 
@@ -1887,7 +1896,9 @@
           ? ' — page limit reached; Resume or +1 continue past it'
           : fetchProgress.reason === 'size-limit'
             ? ' — size limit reached; Resume or +1 continue past it'
-            : '';
+            : fetchProgress.reason === 'manual'
+              ? ' — more pages available; ▶ fetches the rest, +1 one page'
+              : '';
       fetchStatusView.text.textContent = 'Paused at ' + metrics + reason;
     }
   }
@@ -2031,12 +2042,31 @@
       closeAutocomplete();
       return;
     }
-    editor.replaceRange(autocomplete.result.replaceFrom, caret, item.insert);
+    var insert = item.insert;
+    var caretAt = null;
+    if (insert.slice(-1) === '(') {
+      // Function completions close their own parenthesis (programmatic
+      // inserts bypass the editor's auto-close) and leave the caret
+      // inside, so `value[?contains(` becomes `value[?contains(|)`.
+      insert += ')';
+      caretAt = autocomplete.result.replaceFrom + insert.length - 1;
+    }
+    editor.replaceRange(autocomplete.result.replaceFrom, caret, insert, caretAt);
     state.query = editor.getValue();
     storageSet(STORAGE_KEY_QUERY, state.query);
     closeAutocomplete();
-    scheduleRun();
+    if (state.settings.autoEvaluate) {
+      scheduleRun();
+    } else if (ui) {
+      ui.metaRight.textContent = '↵ Enter to evaluate';
+    }
     editor.focus();
+    if (caretAt !== null) {
+      // Inside the fresh parens, property suggestions continue right away
+      // (e.g. the filtered items' field names). Word completions stay
+      // closed — reopening on them would just re-offer longer variants.
+      updateAutocomplete();
+    }
   }
 
   // ------------------------------------------------ advanced query assist
@@ -2850,7 +2880,9 @@
    * missing. Idempotent — safe to call repeatedly from the observer.
    */
   function ensurePlacement() {
-    var anchor = embedAnchor();
+    // ⧉ break-out overrides embedding: the panel stays a full-height side
+    // panel until the user re-embeds it.
+    var anchor = state.forceFloat ? null : embedAnchor();
 
     if (anchor) {
       if (ui.host.parentElement !== anchor) {
@@ -2919,7 +2951,28 @@
       ui.panel.style.display = '';
       ui.panel.classList.toggle('gejq-open', state.open);
     }
+    ui.panel.classList.toggle('gejq-float-max', !state.embedded && state.forceFloat);
     ui.fab.classList.toggle('gejq-hidden', state.open);
+  }
+
+  /** ⧉: break the panel out into the side panel / re-embed it. */
+  function toggleFloatMode() {
+    state.forceFloat = !state.forceFloat;
+    storageSet(STORAGE_KEY_FLOAT, state.forceFloat);
+    ensurePlacement();
+    openPanel(); // breaking out (or coming back) always shows the panel
+    applyFloatToggle();
+  }
+
+  function applyFloatToggle() {
+    if (!ui || !ui.floatToggle) {
+      return;
+    }
+    ui.floatToggle.title = state.forceFloat
+      ? 'Re-embed the panel into Graph Explorer’s results area'
+      : 'Break the panel out into a full-height side panel';
+    ui.floatToggle.setAttribute('aria-label', ui.floatToggle.title);
+    ui.floatToggle.setAttribute('aria-pressed', state.forceFloat ? 'true' : 'false');
   }
 
   function openPanel() {
@@ -2953,7 +3006,13 @@
       input: function () {
         state.query = editor.getValue();
         scheduleQueryStore(); // debounced — no storage write per keystroke
-        scheduleRun();
+        if (state.settings.autoEvaluate) {
+          scheduleRun();
+        } else if (ui) {
+          // Manual mode: nothing is processed until Enter — the go-to
+          // setting when continuous evaluation over big data is too heavy.
+          ui.metaRight.textContent = '↵ Enter to evaluate';
+        }
         updateAutocomplete();
       },
       // Recording happens only on deliberate runs (Enter or chip clicks) —
@@ -3043,9 +3102,9 @@
       getCaret: function () {
         return input.selectionStart !== null && input.selectionStart === input.selectionEnd ? input.selectionStart : null;
       },
-      replaceRange: function (from, to, text) {
+      replaceRange: function (from, to, text, caretAt) {
         input.value = input.value.slice(0, from) + text + input.value.slice(to);
-        var caret = from + text.length;
+        var caret = typeof caretAt === 'number' ? caretAt : from + text.length;
         input.setSelectionRange(caret, caret);
       },
       focus: function () {
@@ -3155,10 +3214,10 @@
         var range = view.state.selection.main;
         return range.empty ? range.head : null;
       },
-      replaceRange: function (from, to, text) {
+      replaceRange: function (from, to, text, caretAt) {
         dispatchProgrammatic({
           changes: { from: from, to: to, insert: text },
-          selection: { anchor: from + text.length }
+          selection: { anchor: typeof caretAt === 'number' ? caretAt : from + text.length }
         });
       },
       focus: function () {
@@ -3238,6 +3297,8 @@
     headerButtons.appendChild(
       button('gejq-icon-button', 'Paste JSON', 'Query JSON you paste in manually', showPasteDialog)
     );
+    var floatToggle = button('gejq-icon-button gejq-float-toggle', '⧉', '', toggleFloatMode);
+    headerButtons.appendChild(floatToggle);
     headerButtons.appendChild(
       button('gejq-icon-button gejq-close', '✕', 'Hide panel (Esc)', closePanel)
     );
@@ -3602,6 +3663,7 @@
       fab: fab,
       fabBadge: fabBadge,
       panel: panel,
+      floatToggle: floatToggle,
       titleLabel: titleLabel,
       historySelect: historySelect,
       liveBadge: liveBadge,
@@ -3645,6 +3707,7 @@
     ensurePlacement();
     renderQueryHistory();
     applyAutoFetchToggle();
+    applyFloatToggle();
     applyLanguage(); // sets placeholder, rebuilds the cheat sheet, runs the query
 
     // Graph Explorer is a React app: the results area comes and goes as
@@ -3652,7 +3715,7 @@
     var observer = new MutationObserver(function () {
       var anchor = embedAnchor();
       var attached = anchor && ui.host.parentElement === anchor;
-      if ((anchor && !attached) || (!anchor && state.embedded) || !ui.host.isConnected) {
+      if ((anchor && !attached && !state.forceFloat) || (!anchor && state.embedded) || !ui.host.isConnected) {
         scheduleEnsurePlacement();
       }
       ensureEvaluatorAttached(); // the hidden evaluator frame must survive too
@@ -3784,9 +3847,10 @@
       })
       .then(function (css) {
         storageGet(
-          [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FORMAT, STORAGE_KEY_COPY_FORMAT, STORAGE_KEY_SPLIT, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
+          [STORAGE_KEY_QUERY, STORAGE_KEY_COLLAPSED, STORAGE_KEY_FLOAT, STORAGE_KEY_FORMAT, STORAGE_KEY_COPY_FORMAT, STORAGE_KEY_SPLIT, STORAGE_KEY_SETTINGS, STORAGE_KEY_QUERY_HISTORY],
           function (items) {
             state.collapsedPref = items[STORAGE_KEY_COLLAPSED] === true;
+            state.forceFloat = items[STORAGE_KEY_FLOAT] === true;
             state.format = ['csv', 'tree'].indexOf(items[STORAGE_KEY_FORMAT]) !== -1 ? items[STORAGE_KEY_FORMAT] : 'json';
             state.copyFormat = items[STORAGE_KEY_COPY_FORMAT] === 'tsv' ? 'tsv' : 'csv';
             state.splitPct = GEJQ.clampInt(items[STORAGE_KEY_SPLIT], 15, 85, 50);
@@ -3827,9 +3891,13 @@
         var previousLanguage = state.settings.queryLanguage;
         var previousShowBackground = state.settings.showBackgroundRequests;
         var previousRichEditor = state.settings.richEditor;
+        var previousAutoEvaluate = state.settings.autoEvaluate;
         state.settings = GEJQ.normalizeSettings(changes[STORAGE_KEY_SETTINGS].newValue);
         pushSettingsToPage();
         applyAutoFetchToggle();
+        if (ui && state.settings.autoEvaluate && !previousAutoEvaluate) {
+          scheduleRun(); // catch up with whatever was typed in manual mode
+        }
         if (ui && state.settings.richEditor !== previousRichEditor) {
           swapQueryEditor();
         }

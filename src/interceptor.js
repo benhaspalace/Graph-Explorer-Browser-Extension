@@ -37,11 +37,12 @@
 
   var idCounter = 0;
 
-  // Deliberately conservative until told otherwise: the extension's
-  // stored default for auto-fetch is ON, but this MAIN-world script keeps
-  // it OFF until the content script pushes the user's actual settings in
-  // shortly after page load — so no extra requests ever fire for a user
-  // who turned the feature off.
+  // Paged responses always get a fetch chain with on-demand controls;
+  // autoFetchNextLink only decides whether the chain STARTS by itself.
+  // The stored default is manual (off), and this MAIN-world script also
+  // keeps it off until the content script pushes the user's actual
+  // settings in shortly after page load — so no extra requests ever fire
+  // unless the user opted into auto mode or pressed ▶/+1 themselves.
   var settings = {
     autoFetchNextLink: false,
     autoFetchMaxPages: 50,
@@ -475,7 +476,7 @@
   }
 
   function maybeAutoFetchAllPages(firstEntry, headers, method) {
-    if (!settings.autoFetchNextLink || String(method || 'GET').toUpperCase() !== 'GET') {
+    if (String(method || 'GET').toUpperCase() !== 'GET') {
       return;
     }
     var firstJson = firstEntry.json;
@@ -516,7 +517,16 @@
       stopRequested: false,
       pausedReason: null
     };
-    continueChain(activeFetch);
+    if (settings.autoFetchNextLink) {
+      continueChain(activeFetch); // auto mode: start fetching right away
+    } else {
+      // Manual mode (the default): the chain exists with the same
+      // controls and limits, it just doesn't run until the user asks —
+      // ▶ fetches the remaining pages, +1 fetches one.
+      activeFetch.state = 'paused';
+      activeFetch.pausedReason = 'manual';
+      postProgress(activeFetch, 'paused', 'manual');
+    }
   }
 
   /** Best-effort view of the headers a fetch call is about to send. */
