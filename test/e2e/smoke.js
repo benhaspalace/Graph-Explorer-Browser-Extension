@@ -615,6 +615,31 @@ function check(name, ok, extra) {
   await query.fill('$.value[*].mail');
   await page.waitForTimeout(300);
 
+  // 8c. Manual evaluation mode: with "Evaluate while typing" off, edits
+  // do NOT run the query (no continuous processing over big data) — only
+  // Enter does, and the metrics row says so while edits are pending.
+  await popup.uncheck('#setting-auto-evaluate');
+  await page.waitForTimeout(400);
+  await query.fill('$.value[*].displayName');
+  await page.waitForTimeout(500);
+  const manualState = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      result: shadow.querySelector('.gejq-result').textContent,
+      meta: shadow.querySelector('.gejq-meta-right').textContent
+    };
+  });
+  check('typing does not evaluate in manual mode', manualState.result.includes('p@x.com') && !manualState.result.includes('Pasted Person'), manualState.result.slice(0, 60));
+  check('metrics row hints Enter in manual mode', manualState.meta.includes('Enter to evaluate'), manualState.meta);
+  await query.press('Enter');
+  await page.waitForTimeout(400);
+  check('Enter evaluates in manual mode', (await page.locator('.gejq-result').innerText()).includes('Pasted Person'));
+  await popup.check('#setting-auto-evaluate');
+  await page.waitForTimeout(400);
+  await query.fill('$.value[*].mail');
+  await page.waitForTimeout(300);
+  check('auto-evaluate restored', (await page.locator('.gejq-result').innerText()).includes('p@x.com'));
+
   // 9. Enter records the query into the persistent history with timestamp + context.
   await query.press('Enter');
   await page.waitForTimeout(300);
@@ -985,6 +1010,87 @@ function check(name, ok, extra) {
   await page.waitForTimeout(400);
   check('clicking the chip again turns auto-fetch back on', (await autoFetchChip()).pressed === 'true');
 
+  // 10d4. With auto-fetch OFF (the default), paged responses still get the
+  // fetch chain — it just starts paused with the ▶/+1 controls; the same
+  // configured limits apply once it runs.
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autofetch-toggle').click());
+  await page.waitForTimeout(400);
+  await page.evaluate(() => window.runGraphQuery('/v1.0/users?manual=1&paged=1'));
+  try {
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        const box = shadow.querySelector('.gejq-fetch-status');
+        return box && box.style.display !== 'none' && box.textContent.includes('more pages available');
+      },
+      { timeout: 10000 }
+    );
+    check('manual mode offers the fetch controls without running', true);
+  } catch (e) {
+    check('manual mode offers the fetch controls without running', false, e.message.split('\n')[0]);
+  }
+  check('manual chain has not fetched anything yet', (await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return !Array.from(shadow.querySelectorAll('.gejq-history-select option')).some(
+      (o) => o.textContent.includes('manual=1') && o.textContent.includes('pages')
+    );
+  })));
+  await fetchControl('+1');
+  try {
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        return Array.from(shadow.querySelectorAll('.gejq-history-select option')).some(
+          (o) => o.textContent.includes('manual=1') && o.textContent.includes('2 pages so far')
+        );
+      },
+      { timeout: 10000 }
+    );
+    check('manual +1 fetches exactly one page', true);
+  } catch (e) {
+    check('manual +1 fetches exactly one page', false, e.message.split('\n')[0]);
+  }
+  await fetchControl('▶');
+  try {
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        return Array.from(shadow.querySelectorAll('.gejq-history-select option')).some(
+          (o) => o.textContent.includes('manual=1') && o.textContent.includes('3 pages') && !o.textContent.includes('incomplete')
+        );
+      },
+      { timeout: 10000 }
+    );
+    check('manual ▶ fetches the remaining pages', true);
+  } catch (e) {
+    check('manual ▶ fetches the remaining pages', false, e.message.split('\n')[0]);
+  }
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autofetch-toggle').click());
+  await page.waitForTimeout(400);
+  // Restore the dataset shape the sections below were written against:
+  // an auto chain on paged=1, paused at the 2-page limit, closed out via
+  // ⟳ off (newest entry = "2 pages, incomplete", 6 items).
+  await page.evaluate(() => window.runGraphQuery('/v1.0/users?paged=1'));
+  await page.waitForFunction(
+    () => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const box = shadow.querySelector('.gejq-fetch-status');
+      return box && box.style.display !== 'none' && box.textContent.includes('Paused');
+    },
+    { timeout: 10000 }
+  );
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autofetch-toggle').click());
+  await page.waitForFunction(
+    () => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const first = shadow.querySelector('.gejq-history-select option');
+      return !!first && first.textContent.includes('paged=1') && first.textContent.includes('2 pages, incomplete');
+    },
+    { timeout: 10000 }
+  );
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autofetch-toggle').click());
+  await page.waitForTimeout(400);
+
   // 10e. Unconvertible queries keep their text, but suggestions follow
   // the new language even while the query errors: `$..displayName` has
   // no JMESPath equivalent and errors there as a syntax error.
@@ -1044,6 +1150,13 @@ function check(name, ok, extra) {
     'dropdown closes after accepting',
     await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autocomplete').style.display === 'none')
   );
+  // Accepted function completions close their own parenthesis and leave
+  // the caret inside.
+  await query.fill('.value | unique_b');
+  await page.waitForTimeout(300);
+  await query.press('Enter');
+  await page.waitForTimeout(200);
+  check('accepted function completion closes its parenthesis', (await queryValue()) === '.value | unique_by()', await queryValue());
   await query.fill('.value | so');
   await page.waitForTimeout(300);
   await query.press('Escape');
@@ -1213,6 +1326,36 @@ function check(name, ok, extra) {
     const hostWidthAfter = await page.evaluate(() => document.getElementById('gejq-host').getBoundingClientRect().width);
     check('dragging the divider widens the panel', hostWidthAfter > hostWidthBefore + 100, `${Math.round(hostWidthBefore)} → ${Math.round(hostWidthAfter)}`);
   }
+
+  // 10j2. ⧉ breaks the panel out into a full-height side panel and back.
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-float-toggle').click());
+  await page.waitForTimeout(400);
+  const floatState = await page.evaluate(() => {
+    const host = document.getElementById('gejq-host');
+    const panel = host.shadowRoot.querySelector('.gejq-panel');
+    const rect = panel.getBoundingClientRect();
+    return {
+      parent: host.parentElement.tagName,
+      inResponseArea: host.parentElement.id === 'response-area',
+      floatMax: panel.classList.contains('gejq-float-max'),
+      open: panel.classList.contains('gejq-open'),
+      fullHeight: Math.abs(rect.height - window.innerHeight) < 4
+    };
+  });
+  check(
+    'panel breaks out into a full-height side panel',
+    !floatState.inResponseArea && floatState.floatMax && floatState.open && floatState.fullHeight,
+    JSON.stringify(floatState)
+  );
+  await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-float-toggle').click());
+  await page.waitForTimeout(400);
+  check(
+    'panel re-embeds into the results area',
+    await page.evaluate(() => {
+      const host = document.getElementById('gejq-host');
+      return host.parentElement.id === 'response-area' && !host.shadowRoot.querySelector('.gejq-panel').classList.contains('gejq-float-max');
+    })
+  );
 
   // 10k. Query input starts as tall as the language selector.
   const inputHeights = await page.evaluate(() => {

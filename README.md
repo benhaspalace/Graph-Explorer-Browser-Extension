@@ -20,7 +20,9 @@ status for this branch.
 - **Split results view** — the Graph Explorer results area splits:
   the original response stays on the left, and the query tool takes the right,
   with the query input on top and the live result underneath. Drag the divider
-  to resize the split; the position is remembered.
+  to resize the split; the position is remembered. Need more room? The ⧉
+  button in the panel header breaks the panel out into a full-height side
+  panel over the page — click it again to re-embed (the choice persists).
 - **Three query languages** — JMESPath (default), JSONPath, or jq, switchable
   from the selector next to the query box or from the extension settings.
   - JMESPath: `value[?jobTitle == 'Auditor'].{name: displayName, email: mail}`
@@ -66,28 +68,28 @@ status for this branch.
 - **Automatic sign-in** — opening Graph Explorer while signed out clicks the
   profile view for you to start the sign-in flow (on by default; your browser
   may ask you to allow the sign-in popup).
-- **Auto-fetch all pages** *(on by default)* — follow the `@odata.nextLink`
-  chain and add the combined dataset to the response list, so you can query
-  the entire result set at once. While pages stream in, the left of the
-  metrics row shows live progress (pages · items · size) behind a leading
-  **⏸ Pause** button — pausing is instant (the page in flight is aborted
-  and simply retried on resume). A paused chain offers **▶ Resume** and
-  **+1** (fetch one page, then pause again); there is no stop button — a
-  chain you never resume just stays paused with everything fetched so far
-  queryable, and running a new query (or turning ⟳ off) closes it out.
-  The configured page-count and data-size limits (defaults: 50 pages /
+- **Fetch all pages, on demand or automatically** — every paged response
+  (`@odata.nextLink`) gets fetch controls on the metrics row. By default
+  nothing runs by itself: the row reads "more pages available", and
+  **▶** fetches the remaining pages while **+1** fetches one page at a
+  time, building a combined dataset you can query whole. Turning the
+  **Auto-fetch all pages** setting on (⟳ next to the response list, or
+  the popup) starts the chain automatically instead — the controls and
+  limits are the same either way. While pages stream in, the row shows
+  live progress (pages · items · size) behind a leading **⏸ Pause**
+  button — pausing is instant (the page in flight is aborted and simply
+  retried on resume). There is no stop button: a chain you never resume
+  just stays paused with everything fetched so far queryable, and
+  running a new query (or turning ⟳ off mid-run) closes it out. The
+  configured page-count and data-size limits (defaults: 50 pages /
   10 MB) are checkpoints, not hard stops: reaching one pauses the chain,
-  and Resume or +1 continue past it — each Resume grants a fresh budget.
+  and ▶ or +1 continue past it — each resume grants a fresh budget.
   While a chain is running, query editing and result refreshes are on
-  hold (the editor grays out): evaluating against a continuously growing
-  dataset would freeze the panel, so the query re-runs exactly once
-  against the settled data at each pause — hit ⏸ any time to edit
-  mid-way. Once a chain ends, the same spot reads "auto-fetched · N
-  pages", with "(incomplete)" when it was closed out early or a page
-  failed. The
-  extension replays the original request's own headers for the follow-up
-  pages; nothing is stored. Toggle the feature from the ⟳ button next to
-  the response list or in the settings.
+  hold (the editor grays out); the query re-runs exactly once against
+  the settled data at each pause. Once a chain ends, the same spot reads
+  "auto-fetched · N pages", with "(incomplete)" when it was closed out
+  early or a page failed. The extension replays the original request's
+  own headers for the follow-up pages; nothing is stored.
 - **Response history** — the last 25 Graph responses are kept (in memory
   only); pick any of them from the dropdown to query it.
 - **Query history** — queries you run (Enter, or clicking a suggestion) are
@@ -207,10 +209,11 @@ Click the toolbar icon to open the settings popup:
 | Query language | JMESPath | JMESPath, JSONPath, or jq (also switchable in the panel) |
 | Advanced queries | on | Visibly adds `$count=true` (URI field) + `ConsistencyLevel: eventual` (Request headers view) for `$filter`/`$search`/`$orderby` queries |
 | Auto sign-in | on | Starts the sign-in flow when you open Graph Explorer signed out |
-| Auto-fetch all pages | on | Follows `@odata.nextLink` and adds the combined dataset to the response list (also toggleable from the panel's ⟳ button) |
-| Auto-fetch limits | 50 pages / 10 MB | Pauses the chain at these checkpoints — Resume/+1 in the panel continue past them |
+| Auto-fetch all pages | off | Paged responses always get ▶/+1 fetch controls; this makes the chain start automatically instead (also toggleable from the panel's ⟳ button) |
+| Auto-fetch limits | 50 pages / 10 MB | Pauses the chain at these checkpoints — ▶/+1 in the panel continue past them |
 | Show background requests | off | Reveal Graph Explorer's own requests in the response list (marked ⚙) |
 | Syntax-highlighting query editor | on | CodeMirror editor (highlighting, bracket matching, undo); turn off for a plain text box |
+| Evaluate while typing | on | Re-runs the query on every edit; turn off to evaluate only on <kbd>Enter</kbd> (the metrics row shows "↵ Enter to evaluate" while edits are pending — recommended for very large datasets) |
 | Query history limit | 50 | How many distinct queries to keep (checkbox for unlimited) |
 
 ### Choosing a query language
@@ -258,7 +261,8 @@ engine covers core jq, without the regex builtins).
   wraps `window.fetch`/`XMLHttpRequest`. JSON responses from Microsoft Graph
   endpoints are forwarded to the content script via `window.postMessage`.
   It observes requests only — it never modifies them; the sole extra traffic
-  is the `@odata.nextLink` auto-fetch (on by default; can be turned off), and
+  is the `@odata.nextLink` page fetching (started on demand with ▶/+1 by
+  default; a setting starts it automatically), and
   it only ever targets Microsoft Graph hosts.
 - `src/content.js` renders the panel inside a ShadowRoot and embeds it into
   Graph Explorer's results area (`#response-area`), splitting it 50/50. A
@@ -294,10 +298,11 @@ engine covers core jq, without the regex builtins).
 ### Privacy
 
 Everything runs locally in your browser. The extension makes no network
-requests of its own — the only exception is the auto-fetch feature (on by
-default; can be turned off), which requests the *next pages of the same Graph
-query* by replaying that request's own headers to Microsoft Graph hosts only;
-they are never read, stored, or sent elsewhere.
+requests of its own — the only exception is the page-fetching feature
+(started on demand with ▶/+1 by default; a setting can start it
+automatically), which requests the *next pages of the same Graph query* by
+replaying that request's own headers to Microsoft Graph hosts only; they
+are never read, stored, or sent elsewhere.
 Captured responses live only in memory — small ones in the page, large ones
 in the extension's hidden evaluator frame — and are cleared on reload. What is
 persisted via `chrome.storage.local`: your settings, your last query text,

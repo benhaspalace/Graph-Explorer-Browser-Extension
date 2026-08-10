@@ -40,7 +40,7 @@
     </label>
     <label>
       <input type="checkbox" id="setting-auto-fetch" />
-      <span>Auto-fetch all pages: follow <code>@odata.nextLink</code> and add the combined dataset to the response list</span>
+      <span>Auto-fetch all pages: start following <code>@odata.nextLink</code> automatically when a response is paged — when off (default), paged responses show ▶/+1 controls in the panel to fetch on demand instead</span>
     </label>
     <label class="sub">
       <span class="field-label">Auto-fetch limits</span>
@@ -54,6 +54,10 @@
     <label>
       <input type="checkbox" id="setting-rich-editor" />
       <span>Syntax-highlighting query editor (highlighting, bracket matching, undo) — turn off for a plain text box</span>
+    </label>
+    <label>
+      <input type="checkbox" id="setting-auto-evaluate" />
+      <span>Evaluate while typing — turn off to evaluate only when you press <kbd>Enter</kbd> (recommended for very large datasets)</span>
     </label>
     <label>
       <span class="field-label">Query history limit</span>

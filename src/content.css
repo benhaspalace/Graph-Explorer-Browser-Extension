@@ -170,6 +170,12 @@
   transform: translateX(0);
 }
 
+/* ⧉ break-out: the panel as a deliberately wider full-height side panel
+   (the same fixed drawer, sized for real work until re-embedded). */
+.gejq-panel.gejq-float-max {
+  width: min(760px, 95vw);
+}
+
 /* Embedded mode: the panel is the right half of Graph Explorer's results
    area — a normal-flow block instead of a fixed drawer. Query input sits
    on top, results underneath. */
