@@ -41,6 +41,13 @@ within a few business days.
 - **Cross-context messaging is validated.** The MAIN-world ↔ isolated-world
   `postMessage` bridge checks `event.source === window` and
   `event.origin === location.origin` and validates the message shape.
+- **The off-thread evaluator is inert by design.** Large datasets are queried
+  in a hidden extension-origin iframe (`src/evaluator.html`, hosted in the
+  extension's own process so evaluations never block the page). It holds
+  datasets in memory only, runs nothing but the three vendored query engines
+  over the JSON it is handed (no code evaluation, no storage, no network,
+  no privileged APIs), and the panel only trusts replies whose
+  `event.source` is that exact frame — page scripts cannot forge it.
 - **Least privilege.** The only requested permission is `storage`. Host access
   is limited to `developer.microsoft.com` graph-explorer pages via content
   script `matches` — there is no `tabs` permission and no broad host access.

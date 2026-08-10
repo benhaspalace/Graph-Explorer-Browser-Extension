@@ -701,15 +701,26 @@ function check(name, ok, extra) {
     runningControls.buttons.join('') === '⏸' && runningControls.links === 0,
     JSON.stringify(runningControls)
   );
-  // Editing the query while pages are in flight must keep working — and
-  // must not wedge the pause control (regression: typing mid-fetch froze
-  // both the editor and the fetch controls).
-  await query.fill('$.value[*].displayName');
-  await page.waitForTimeout(300);
+  // While pages are in flight the query editor is grayed out and the
+  // result view does not refresh — evaluating against the continuously
+  // growing dataset is what froze the panel (regression). Pausing the
+  // fetch re-enables both.
+  const lockedState = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const input = shadow.querySelector('.gejq-query-input');
+    const cmContent = input.querySelector('.cm-content');
+    return {
+      lockedClass: input.classList.contains('gejq-query-locked'),
+      editable: cmContent ? cmContent.getAttribute('contenteditable') : String(!input.disabled),
+      statusText: shadow.querySelector('.gejq-fetch-status').textContent
+    };
+  });
   check(
-    'query edits evaluate while pages are in flight',
-    (await page.locator('.gejq-result').innerText()).includes('Adele Vance')
+    'query editor grayed out while fetching',
+    lockedState.lockedClass && lockedState.editable === 'false',
+    JSON.stringify(lockedState)
   );
+  check('status line says editing is paused', lockedState.statusText.includes('editing paused'), lockedState.statusText);
   await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     Array.from(shadow.querySelectorAll('.gejq-fetch-status .gejq-fetch-btn'))
@@ -732,6 +743,22 @@ function check(name, ok, extra) {
       () => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-fetch-status').textContent
     ));
   }
+  // Once paused, the editor unlocks and edits evaluate again.
+  check(
+    'editor unlocked once paused',
+    await page.evaluate(() => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const input = shadow.querySelector('.gejq-query-input');
+      const cmContent = input.querySelector('.cm-content');
+      return !input.classList.contains('gejq-query-locked') && (!cmContent || cmContent.getAttribute('contenteditable') === 'true');
+    })
+  );
+  await query.fill('$.value[*].displayName');
+  await page.waitForTimeout(400);
+  check(
+    'query edits evaluate once paused',
+    (await page.locator('.gejq-result').innerText()).includes('Adele Vance')
+  );
   // Resume re-fetches the aborted page and completes all three pages.
   await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
@@ -1342,6 +1369,120 @@ function check(name, ok, extra) {
   });
   check('pinned result becomes the selected source', pinnedState.firstOption.includes('pinned result'), pinnedState.firstOption);
   check('pinned result is queryable', pinnedState.query === '' && pinnedState.result.includes('adele@contoso.com'));
+
+  // 10p2. Off-thread evaluation: datasets above 512 KB are queried in the
+  // hidden extension-origin evaluator iframe (its own process), which
+  // returns a capped preview + exact size instead of the whole value.
+  check(
+    'evaluator iframe embedded (extension origin, hidden)',
+    await page.evaluate(() => {
+      const frame = document.getElementById('gejq-evaluator');
+      return !!frame && frame.src.startsWith('chrome-extension://') && frame.style.display === 'none';
+    })
+  );
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    Array.from(shadow.querySelectorAll('.gejq-icon-button'))
+      .find((b) => b.textContent === 'Paste JSON')
+      .click();
+    const items = [];
+    for (let i = 0; i < 30000; i++) {
+      items.push({
+        id: i,
+        name: 'Item number ' + String(i).padStart(5, '0'),
+        description: 'A reasonably long description string for item ' + i + ' that pads the dataset with enough bytes to cross the off-thread threshold.'
+      });
+    }
+    const input = shadow.querySelector('.gejq-paste-input');
+    input.value = JSON.stringify({ value: items });
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    Array.from(shadow.querySelectorAll('.gejq-dialog .gejq-action'))
+      .find((b) => b.textContent === 'Use JSON')
+      .click();
+  });
+  try {
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        return shadow.querySelector('.gejq-result').textContent.includes('Result is large');
+      },
+      { timeout: 15000 }
+    );
+    check('large pasted dataset renders an off-thread preview', true);
+  } catch (e) {
+    check('large pasted dataset renders an off-thread preview', false, e.message.split('\n')[0]);
+  }
+  const largeMeta = await page.locator('.gejq-meta-right').innerText();
+  check('exact size reported for the large result', /object · 1 key · \d+(\.\d+)? MB/.test(largeMeta), largeMeta);
+  await query.fill('.value');
+  await page.waitForFunction(
+    () => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-meta-right').textContent.includes('30000 items'),
+    { timeout: 15000 }
+  );
+  check(
+    'tree view disabled for large results',
+    await page.evaluate(() => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      return Array.from(shadow.querySelectorAll('.gejq-seg-btn')).find((b) => b.textContent === 'Tree').disabled;
+    })
+  );
+  await page.locator('.gejq-seg-btn', { hasText: 'CSV' }).click();
+  await page.waitForFunction(
+    () => document.getElementById('gejq-host').shadowRoot.querySelectorAll('.gejq-table tbody tr').length === 1000,
+    { timeout: 15000 }
+  );
+  const largeTable = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      notice: shadow.querySelector('.gejq-result .gejq-notice').textContent,
+      firstCell: shadow.querySelector('.gejq-table tbody tr').children[1].textContent
+    };
+  });
+  check('large table shows capped evaluator rows', largeTable.notice.includes('first 1000 of 30000'), largeTable.notice);
+  // Sorting a large table round-trips through the evaluator.
+  const clickLargeHeader = () =>
+    page.evaluate(() => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      Array.from(shadow.querySelectorAll('.gejq-th-button')).find((b) => b.textContent.includes('name')).click();
+    });
+  await clickLargeHeader();
+  await page.waitForTimeout(400);
+  await clickLargeHeader(); // descending
+  try {
+    await page.waitForFunction(
+      () =>
+        document
+          .getElementById('gejq-host')
+          .shadowRoot.querySelector('.gejq-table tbody tr')
+          .children[1].textContent.includes('29999'),
+      { timeout: 15000 }
+    );
+    check('large table sorts via the evaluator', true);
+  } catch (e) {
+    check('large table sorts via the evaluator', false, e.message.split('\n')[0]);
+  }
+  // Download of a large result fetches the full text from the evaluator.
+  await page.locator('.gejq-seg-btn', { hasText: 'JSON' }).click();
+  await page.waitForTimeout(400);
+  const [largeDownload] = await Promise.all([
+    page.waitForEvent('download'),
+    page.evaluate(() => {
+      const btns = document.getElementById('gejq-host').shadowRoot.querySelectorAll('.gejq-footer .gejq-action');
+      btns[btns.length - 1].click();
+    })
+  ]);
+  const largeStream = await largeDownload.createReadStream();
+  let largeBytes = 0;
+  let largeHead = '';
+  for await (const chunk of largeStream) {
+    if (largeHead.length < 2) largeHead += chunk.toString('utf8', 0, 2);
+    largeBytes += chunk.length;
+  }
+  check(
+    'large download exports the full off-thread result',
+    largeBytes > 3000000 && largeHead.startsWith('['),
+    largeBytes + ' bytes, starts ' + JSON.stringify(largeHead)
+  );
 
   // 10q. History rows: hover copy, label, delete, confirm-clear.
   const rowButtons = await page.evaluate(() => {
