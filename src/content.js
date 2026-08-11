@@ -24,8 +24,8 @@
   var SETTINGS_SOURCE = 'gejq-settings';
   var EMBED_ANCHOR_ID = 'response-area';
   var MAX_HISTORY = 25;
-  var HIGHLIGHT_LIMIT = 300000; // chars of JSON to syntax-highlight
-  var RENDER_LIMIT = 2000000; // chars of JSON to render at all
+  var HIGHLIGHT_LIMIT = 131072; // chars of JSON to syntax-highlight (span count!)
+  var RENDER_LIMIT = 2000000; // serialized chars a result may return whole
   var STORAGE_KEY_QUERY = 'gejq.lastQuery';
   var STORAGE_KEY_COLLAPSED = 'gejq.embedCollapsed';
   var STORAGE_KEY_FLOAT = 'gejq.forceFloat';
@@ -106,6 +106,7 @@
     lastOutcome: null, // result of the last runQuery evaluation (avoids re-running)
     lastOutcomeKey: '', // (response, language, query) the evaluation belongs to
     lastOutcomeResponse: null, // the response object itself (in-place updates invalidate)
+    lastRenderStamp: '', // what the shown output was rendered from (dedupe)
     graphEqOpen: false // Graph (OData) equivalent panel visibility
   };
 
@@ -460,15 +461,18 @@
       renderTree(output, value);
       return { mode: 'tree', size: size, overflow: limited.overflow };
     }
-    if (limited.truncated) {
+    if (limited.truncated || text.length > PREVIEW_LIMIT) {
+      // The DISPLAYED text is capped like the evaluator's previews: even
+      // when the value itself is small enough to hold, laying out
+      // megabytes of <pre> froze the page right after an evaluation.
       output.appendChild(
         el(
           'div',
           'gejq-notice',
-          'Result is large (' + (limited.overflow ? '≥ ' : '') + GEJQ.formatBytes(size) + '). Showing the first ' + GEJQ.formatBytes(text.length) + ' — use Copy or Download for the full result.'
+          'Result is large (' + (limited.overflow ? '≥ ' : '') + GEJQ.formatBytes(size) + '). Showing the first ' + GEJQ.formatBytes(Math.min(text.length, PREVIEW_LIMIT)) + ' — use Copy or Download for the full result.'
         )
       );
-      output.appendChild(el('pre', 'gejq-json', text + '\n…'));
+      output.appendChild(el('pre', 'gejq-json', text.slice(0, PREVIEW_LIMIT) + '\n…'));
       return { mode: 'json', size: size, overflow: limited.overflow };
     }
     var pre = el('pre', 'gejq-json');
@@ -1033,18 +1037,39 @@
     finishOutcome(currentResult(), response, key, record);
   }
 
+  /** Everything the rendered output depends on besides the outcome. */
+  function renderStamp(key) {
+    return (
+      key + '|' + state.format +
+      (state.diff.active ? '|diff:' + state.diff.baseId : '') +
+      '|' + state.tableSort.column + ':' + state.tableSort.dir
+    );
+  }
+
   /** Store + render an evaluation outcome (local or from the evaluator). */
   function finishOutcome(outcome, response, key, record) {
+    // Skip identical re-renders: after Enter, the trailing debounce (or a
+    // cache-hit re-run) used to rebuild the same multi-hundred-KB result
+    // DOM a second time — that layout was itself a visible freeze.
+    var stamp = renderStamp(key);
+    var unchanged =
+      outcome === state.lastOutcome &&
+      response === state.lastOutcomeResponse &&
+      stamp === state.lastRenderStamp &&
+      ui.metaRight.textContent.indexOf('Enter to evaluate') === -1; // clear the manual-mode hint
     state.lastOutcome = outcome; // reused by exports/pin — no re-evaluation
     state.lastOutcomeKey = key;
     state.lastOutcomeResponse = response;
-    applyOutcome(outcome, response);
+    if (!unchanged) {
+      applyOutcome(outcome, response);
+    }
     if (record) {
       recordQuery(outcome);
     }
   }
 
   function applyOutcome(outcome, response) {
+    state.lastRenderStamp = renderStamp(state.lastOutcomeKey);
     if (outcome.error) {
       ui.error.textContent = outcome.error;
       updateExportButtons(outcome);
@@ -2734,12 +2759,29 @@
     });
   }
 
+  /** Reset every history filter and the controls that show them. */
+  function clearHistoryFilter() {
+    state.historyFilter = { text: '', sinceMs: 0, tags: [] };
+    ui.historyFilterText.value = '';
+    ui.historyFilterTime.value = '0';
+    renderQueryHistory();
+  }
+
   function renderQueryHistory() {
     var container = ui.queryHistoryList;
     clearChildren(container);
+    // Tag chips come from the history itself, so a tag that no longer
+    // exists anywhere must not stay in the filter — it would filter every
+    // row away with no chip left to turn it off.
+    state.historyFilter.tags = GEJQ.knownFilterTags(state.historyFilter.tags, state.queryHistory);
     renderHistoryTagChips();
     var total = state.queryHistory.length;
     if (total === 0) {
+      // Nothing left to filter: drop the filters too, so queries recorded
+      // later are not hidden by a filter the (hidden) bar still holds.
+      state.historyFilter = { text: '', sinceMs: 0, tags: [] };
+      ui.historyFilterText.value = '';
+      ui.historyFilterTime.value = '0';
       ui.queryHistorySummary.textContent = 'Query history';
       ui.historyFilterRow.style.display = 'none';
       container.appendChild(
@@ -2751,10 +2793,14 @@
     var filtered = GEJQ.filterQueryHistory(state.queryHistory, state.historyFilter, Date.now());
     var filterActive =
       state.historyFilter.text.trim() !== '' || state.historyFilter.sinceMs > 0 || state.historyFilter.tags.length > 0;
+    ui.historyFilterClear.style.display = filterActive ? '' : 'none';
     ui.queryHistorySummary.textContent =
       'Query history (' + (filterActive ? filtered.length + '/' + total : total) + ')';
     if (filtered.length === 0) {
       container.appendChild(el('p', 'gejq-help-text', 'No saved queries match the filter.'));
+      container.appendChild(
+        button('gejq-chip', 'Clear filters', 'Show all saved queries again', clearHistoryFilter)
+      );
       return;
     }
     var groups = GEJQ.groupQueryHistory(filtered);
@@ -3039,6 +3085,10 @@
         }
         if (event.key === 'Enter' && !event.shiftKey) {
           event.preventDefault();
+          if (runTimer) {
+            clearTimeout(runTimer); // this run replaces the pending debounce
+            runTimer = null;
+          }
           recordNext = true; // record once the (possibly async) run lands
           runQuery();
           return true;
@@ -3129,6 +3179,12 @@
     var placeholderCompartment = new cm.Compartment();
     var editableCompartment = new cm.Compartment();
     // Colors come from CSS variables so the editor follows the panel theme.
+    // Rainbow brackets: (, [ and { are colored by NESTING DEPTH rather
+    // than by kind, so the pairs in `value[?contains(x, 'y')].{a: b}` are
+    // told apart at a glance. The bundle exports no Tag.define, so the
+    // three bracket-family tags carry the three depth slots (see
+    // tokenTable below) — a closer always gets its opener's color.
+    var BRACKET_TOKENS = ['gejqBracket1', 'gejqBracket2', 'gejqBracket3'];
     var highlightStyle = cm.HighlightStyle.define([
       { tag: cm.tags.string, color: 'var(--gejq-tok-string)' },
       { tag: cm.tags.number, color: 'var(--gejq-tok-number)' },
@@ -3136,14 +3192,41 @@
       { tag: cm.tags.operator, color: 'var(--gejq-tok-operator)' },
       { tag: cm.tags.variableName, color: 'var(--gejq-tok-variable)' },
       { tag: cm.tags.propertyName, color: 'var(--gejq-tok-property)' },
-      { tag: cm.tags.bracket, color: 'var(--gejq-tok-bracket)' }
+      { tag: cm.tags.bracket, color: 'var(--gejq-tok-bracket)' },
+      { tag: cm.tags.paren, color: 'var(--gejq-tok-bracket-1)' },
+      { tag: cm.tags.squareBracket, color: 'var(--gejq-tok-bracket-2)' },
+      { tag: cm.tags.brace, color: 'var(--gejq-tok-bracket-3)' }
     ]);
     function streamLanguage(languageKey) {
       return cm.StreamLanguage.define({
-        token: function (stream) {
+        // Depth lives in the stream state (not recomputed per token), so
+        // tokenizing stays linear and survives Shift+Enter line breaks.
+        startState: function () {
+          return { depth: 0 };
+        },
+        copyState: function (previous) {
+          return { depth: previous.depth };
+        },
+        token: function (stream, state) {
+          var start = stream.pos;
           var token = GEJQ.nextQueryToken(languageKey, stream.string, stream.pos);
           stream.pos = token.end > stream.pos ? token.end : stream.pos + 1;
-          return token.type;
+          if (token.type !== 'bracket') {
+            return token.type;
+          }
+          var ch = stream.string[start];
+          if (ch === '(' || ch === '[' || ch === '{') {
+            var slot = state.depth % BRACKET_TOKENS.length;
+            state.depth++;
+            return BRACKET_TOKENS[slot];
+          }
+          state.depth = Math.max(0, state.depth - 1);
+          return BRACKET_TOKENS[state.depth % BRACKET_TOKENS.length];
+        },
+        tokenTable: {
+          gejqBracket1: cm.tags.paren,
+          gejqBracket2: cm.tags.squareBracket,
+          gejqBracket3: cm.tags.brace
         }
       });
     }
@@ -3503,6 +3586,13 @@
       renderQueryHistory();
     });
     historyFilterRow.appendChild(historyFilterTime);
+    // Always-available way back to the unfiltered list (hidden when no
+    // filter is active) — no filter combination can strand the user.
+    var historyFilterClear = button('gejq-icon-mini gejq-hist-filter-clear', '✕', 'Clear all history filters', function () {
+      clearHistoryFilter();
+    });
+    historyFilterClear.style.display = 'none';
+    historyFilterRow.appendChild(historyFilterClear);
     queryHistoryBody.appendChild(historyFilterRow);
     var historyTagChips = el('div', 'gejq-chip-row gejq-hist-tags');
     queryHistoryBody.appendChild(historyTagChips);
@@ -3689,6 +3779,9 @@
       queryHistoryList: queryHistoryList,
       queryHistorySummary: queryHistorySummary,
       historyFilterRow: historyFilterRow,
+      historyFilterText: historyFilterText,
+      historyFilterTime: historyFilterTime,
+      historyFilterClear: historyFilterClear,
       historyTagChips: historyTagChips,
       copyButton: copyButton,
       copyFormatSelect: copyFormatSelect,

@@ -47,9 +47,13 @@ status for this branch.
   modified behind the scenes. On by default; toggle it in the settings.
 - **Query editor** — a CodeMirror 6 editor with per-language highlighting
   (strings, numbers, functions, `@`/`$` references, properties),
-  matching-bracket highlighting, auto-closing brackets/quotes, and
-  undo/redo; Enter runs and saves the query, Shift+Enter inserts a line
-  break, and the box is drag-resizable. Prefer something simpler? Turn off
+  **rainbow brackets** — `(`, `[` and `{` are colored by nesting depth, so
+  the pairs in `value[?contains(a, 'b')].{c: d}` are easy to tell apart, and
+  every closer matches its opener — plus matching-bracket emphasis,
+  auto-closing brackets/quotes (accepted function completions close their
+  own parenthesis with the caret inside), and undo/redo; Enter runs and
+  saves the query, Shift+Enter inserts a line break, and the box is
+  drag-resizable. Prefer something simpler? Turn off
   **Syntax-highlighting query editor** in the settings for a plain text
   box — switching swaps the editor in place, keeping your current query.
 - **Query completion** — typing in the query box opens a completion

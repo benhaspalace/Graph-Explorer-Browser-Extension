@@ -33,6 +33,10 @@
   --gejq-tok-property: #a31515;
   --gejq-tok-bracket: #0431fa;
   --gejq-tok-bracket-match: #0431fa;
+  /* Rainbow brackets: nesting depth cycles these three hues. */
+  --gejq-tok-bracket-1: #0431fa;
+  --gejq-tok-bracket-2: #319331;
+  --gejq-tok-bracket-3: #7b3814;
   --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
 }
 
@@ -62,6 +66,9 @@
     --gejq-tok-property: #9cdcfe;
     --gejq-tok-bracket: #ffd700;
     --gejq-tok-bracket-match: #ffd700;
+    --gejq-tok-bracket-1: #ffd700;
+    --gejq-tok-bracket-2: #da70d6;
+    --gejq-tok-bracket-3: #179fff;
     --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
   }
 }
@@ -87,7 +94,11 @@
   --gejq-tok-operator: #adadad;
   --gejq-tok-variable: #4fc1ff;
   --gejq-tok-property: #9cdcfe;
+  --gejq-tok-bracket: #ffd700;
   --gejq-tok-bracket-match: rgba(97, 175, 239, 0.3);
+  --gejq-tok-bracket-1: #ffd700;
+  --gejq-tok-bracket-2: #da70d6;
+  --gejq-tok-bracket-3: #179fff;
   --gejq-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
 }
 
@@ -1000,6 +1011,12 @@
   display: flex;
   gap: 6px;
   margin-bottom: 6px;
+}
+
+/* Reset-all-filters button; sized to its glyph beside the filter inputs. */
+.gejq-hist-filter-clear {
+  align-self: center;
+  font-size: 13px;
 }
 
 .gejq-hist-filter-text {

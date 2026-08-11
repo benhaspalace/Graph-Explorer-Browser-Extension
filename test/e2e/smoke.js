@@ -384,6 +384,36 @@ function check(name, ok, extra) {
       Number(bracketStyle.matchWeight) >= 700,
     JSON.stringify(bracketStyle)
   );
+  // Rainbow brackets: nesting depth (not bracket kind) drives the color,
+  // and a closer matches its own opener. `value[?contains(a, 'b')].{c: d}`
+  // nests [ → ( at depths 1/2, while the trailing { is depth 1 again.
+  await query.fill("value[?contains(displayName, 'A')].{n: displayName}");
+  await page.waitForTimeout(300);
+  const rainbow = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const colors = {};
+    Array.from(shadow.querySelectorAll('.gejq-query-editor .cm-line span[class]')).forEach((span) => {
+      if (/^[()[\]{}]$/.test(span.textContent)) {
+        (colors[span.textContent] = colors[span.textContent] || []).push(getComputedStyle(span).color);
+      }
+    });
+    return colors;
+  });
+  check(
+    'CM: nested brackets get different colors by depth',
+    !!rainbow['['] && !!rainbow['('] && rainbow['['][0] !== rainbow['('][0],
+    JSON.stringify(rainbow)
+  );
+  check(
+    'CM: a closing bracket matches its opener’s color',
+    !!rainbow[']'] && rainbow[']'][0] === rainbow['['][0] && !!rainbow[')'] && rainbow[')'][0] === rainbow['('][0],
+    JSON.stringify(rainbow)
+  );
+  check(
+    'CM: depth resets — the trailing { shares the outer depth color',
+    !!rainbow['{'] && rainbow['{'][0] === rainbow['['][0],
+    JSON.stringify(rainbow)
+  );
 
   await query.fill('value[].{name: displayName, email: mail}');
   await page.waitForTimeout(400);
@@ -1283,11 +1313,46 @@ function check(name, ok, extra) {
   });
   check('tag chip filters the history', tagFiltered.rows === 1 && tagFiltered.rows < rowsBefore, `rows ${rowsBefore} → ${tagFiltered.rows}, ${tagFiltered.summary}`);
   check('summary shows filtered/total count', /\(\d+\/\d+\)/.test(tagFiltered.summary), tagFiltered.summary);
+  // Regression: removing the tag from the LAST row that carries it while
+  // filtering by that tag used to strand the panel — every row filtered
+  // away, and the chip that could switch the filter off was gone with the
+  // tag. The filter must drop tags the history no longer has.
+  const clearFilterButtonVisible = await page.evaluate(() => {
+    const clear = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-hist-filter-clear');
+    return !!clear && clear.style.display !== 'none';
+  });
+  check('a clear-filters control is offered while filtering', clearFilterButtonVisible);
   await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
-    Array.from(shadow.querySelectorAll('.gejq-hist-tags .gejq-chip')).find((c) => c.textContent === '#counts').click();
+    const row = shadow.querySelector('.gejq-query-history .gejq-example');
+    Array.from(row.querySelectorAll('.gejq-icon-mini')).find((b) => b.textContent === '🏷').click();
   });
-  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const input = shadow.querySelector('.gejq-query-history .gejq-tag-input');
+    input.value = ''; // remove the only #counts tag
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  const afterTagRemoval = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      rows: shadow.querySelectorAll('.gejq-query-history .gejq-example').length,
+      body: shadow.querySelector('.gejq-query-history').textContent,
+      chips: Array.from(shadow.querySelectorAll('.gejq-hist-tags .gejq-chip')).map((c) => c.textContent),
+      summary: Array.from(shadow.querySelectorAll('.gejq-panel details summary')).map((s) => s.textContent).find((t) => t.startsWith('Query history'))
+    };
+  });
+  check(
+    'removing the last instance of a filtered tag does not strand the list',
+    afterTagRemoval.rows === rowsBefore && !afterTagRemoval.body.includes('No saved queries match'),
+    JSON.stringify({ rows: afterTagRemoval.rows, expected: rowsBefore, summary: afterTagRemoval.summary })
+  );
+  check(
+    'the vanished tag is dropped from the filter and its chips',
+    !afterTagRemoval.chips.includes('#counts') && !/\(\d+\/\d+\)/.test(afterTagRemoval.summary || ''),
+    JSON.stringify(afterTagRemoval.chips) + ' ' + afterTagRemoval.summary
+  );
   const filterInput = page.locator('.gejq-hist-filter-text');
   await filterInput.fill('displayName');
   await page.waitForTimeout(200);
@@ -1634,6 +1699,43 @@ function check(name, ok, extra) {
     largeBytes > 3000000 && largeHead.startsWith('['),
     largeBytes + ' bytes, starts ' + JSON.stringify(largeHead)
   );
+
+  // 10p2b. Results that come back WHOLE (under the value limit) but are
+  // still hundreds of KB must render capped: laying out a ~400 KB <pre>
+  // right after an evaluation was itself a freeze.
+  await query.fill('.value[0:2000]');
+  await page.waitForFunction(
+    () => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-meta-right').textContent.includes('2000 items'),
+    { timeout: 15000 }
+  );
+  const cappedRender = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const notice = shadow.querySelector('.gejq-result .gejq-notice');
+    const pre = shadow.querySelector('.gejq-result .gejq-json');
+    return {
+      notice: notice ? notice.textContent : '',
+      preChars: pre ? pre.textContent.length : 0,
+      spans: shadow.querySelectorAll('.gejq-result .gejq-json span').length,
+      meta: shadow.querySelector('.gejq-meta-right').textContent
+    };
+  });
+  check(
+    'mid-size result renders a capped preview, not the whole text',
+    cappedRender.preChars > 0 && cappedRender.preChars < 300000 && cappedRender.notice.includes('Showing the first'),
+    JSON.stringify({ notice: cappedRender.notice.slice(0, 70), preChars: cappedRender.preChars })
+  );
+  check(
+    'capped preview is not syntax-highlighted span-by-span',
+    cappedRender.spans === 0,
+    String(cappedRender.spans)
+  );
+  check(
+    'full size still reported for the capped result',
+    /· \d+(\.\d+)? (KB|MB)/.test(cappedRender.meta),
+    cappedRender.meta
+  );
+  await query.fill('.value'); // the section below counts the whole collection
+  await page.waitForTimeout(400);
 
   // 10p3. Large SINGLE responses are shipped by the interceptor straight
   // to the evaluator as raw text — the panel receives metadata plus a
