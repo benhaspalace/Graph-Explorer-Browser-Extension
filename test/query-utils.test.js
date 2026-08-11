@@ -1214,3 +1214,17 @@ test('property completions work inside filter function calls', () => {
   // Inside a string literal, nothing pops.
   assert.equal(GEJQ.queryCompletions('jmespath', "value[?contains(displayName, 'Ad", json), null);
 });
+
+test('knownFilterTags drops filter tags no longer present in the history', () => {
+  const list = [
+    { query: 'a', language: 'jq', tags: ['users', 'counts'] },
+    { query: 'b', language: 'jq', tags: [] }
+  ];
+  assert.deepEqual(GEJQ.knownFilterTags(['counts', 'gone', 'users'], list), ['counts', 'users']);
+  // The last entry carrying a tag loses it → the filter must not keep it.
+  assert.deepEqual(GEJQ.knownFilterTags(['counts'], [{ query: 'a', language: 'jq', tags: [] }]), []);
+  assert.deepEqual(GEJQ.knownFilterTags(['counts'], []), []);
+  assert.deepEqual(GEJQ.knownFilterTags(undefined, list), []);
+  // Entries with no tags array at all are tolerated.
+  assert.deepEqual(GEJQ.knownFilterTags(['x'], [{ query: 'a', language: 'jq' }]), []);
+});

@@ -2759,12 +2759,29 @@
     });
   }
 
+  /** Reset every history filter and the controls that show them. */
+  function clearHistoryFilter() {
+    state.historyFilter = { text: '', sinceMs: 0, tags: [] };
+    ui.historyFilterText.value = '';
+    ui.historyFilterTime.value = '0';
+    renderQueryHistory();
+  }
+
   function renderQueryHistory() {
     var container = ui.queryHistoryList;
     clearChildren(container);
+    // Tag chips come from the history itself, so a tag that no longer
+    // exists anywhere must not stay in the filter — it would filter every
+    // row away with no chip left to turn it off.
+    state.historyFilter.tags = GEJQ.knownFilterTags(state.historyFilter.tags, state.queryHistory);
     renderHistoryTagChips();
     var total = state.queryHistory.length;
     if (total === 0) {
+      // Nothing left to filter: drop the filters too, so queries recorded
+      // later are not hidden by a filter the (hidden) bar still holds.
+      state.historyFilter = { text: '', sinceMs: 0, tags: [] };
+      ui.historyFilterText.value = '';
+      ui.historyFilterTime.value = '0';
       ui.queryHistorySummary.textContent = 'Query history';
       ui.historyFilterRow.style.display = 'none';
       container.appendChild(
@@ -2776,10 +2793,14 @@
     var filtered = GEJQ.filterQueryHistory(state.queryHistory, state.historyFilter, Date.now());
     var filterActive =
       state.historyFilter.text.trim() !== '' || state.historyFilter.sinceMs > 0 || state.historyFilter.tags.length > 0;
+    ui.historyFilterClear.style.display = filterActive ? '' : 'none';
     ui.queryHistorySummary.textContent =
       'Query history (' + (filterActive ? filtered.length + '/' + total : total) + ')';
     if (filtered.length === 0) {
       container.appendChild(el('p', 'gejq-help-text', 'No saved queries match the filter.'));
+      container.appendChild(
+        button('gejq-chip', 'Clear filters', 'Show all saved queries again', clearHistoryFilter)
+      );
       return;
     }
     var groups = GEJQ.groupQueryHistory(filtered);
@@ -3565,6 +3586,13 @@
       renderQueryHistory();
     });
     historyFilterRow.appendChild(historyFilterTime);
+    // Always-available way back to the unfiltered list (hidden when no
+    // filter is active) — no filter combination can strand the user.
+    var historyFilterClear = button('gejq-icon-mini gejq-hist-filter-clear', '✕', 'Clear all history filters', function () {
+      clearHistoryFilter();
+    });
+    historyFilterClear.style.display = 'none';
+    historyFilterRow.appendChild(historyFilterClear);
     queryHistoryBody.appendChild(historyFilterRow);
     var historyTagChips = el('div', 'gejq-chip-row gejq-hist-tags');
     queryHistoryBody.appendChild(historyTagChips);
@@ -3751,6 +3779,9 @@
       queryHistoryList: queryHistoryList,
       queryHistorySummary: queryHistorySummary,
       historyFilterRow: historyFilterRow,
+      historyFilterText: historyFilterText,
+      historyFilterTime: historyFilterTime,
+      historyFilterClear: historyFilterClear,
       historyTagChips: historyTagChips,
       copyButton: copyButton,
       copyFormatSelect: copyFormatSelect,

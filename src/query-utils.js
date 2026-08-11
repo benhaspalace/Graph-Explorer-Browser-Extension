@@ -2923,6 +2923,23 @@
     return groups;
   }
 
+  /**
+   * Keep only the filter tags that still exist somewhere in the history.
+   * The tag chips are built from the history, so a tag removed from the
+   * last entry carrying it would otherwise leave the list filtered by
+   * something with no chip left to switch back off — an empty view with
+   * no way out. Input order is preserved.
+   */
+  function knownFilterTags(tags, list) {
+    var known = {};
+    distinctTags(list).forEach(function (tag) {
+      known[tag] = true;
+    });
+    return (Array.isArray(tags) ? tags : []).filter(function (tag) {
+      return known[tag] === true;
+    });
+  }
+
   /** Distinct tags across the history, alphabetical. */
   function distinctTags(list) {
     var seen = {};
@@ -3400,6 +3417,7 @@
     trimQueryHistoryList: trimQueryHistoryList,
     groupQueryHistory: groupQueryHistory,
     distinctTags: distinctTags,
+    knownFilterTags: knownFilterTags,
     filterQueryHistory: filterQueryHistory,
     formatTimestamp: formatTimestamp,
     csvEligible: csvEligible,

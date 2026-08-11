@@ -1313,11 +1313,46 @@ function check(name, ok, extra) {
   });
   check('tag chip filters the history', tagFiltered.rows === 1 && tagFiltered.rows < rowsBefore, `rows ${rowsBefore} → ${tagFiltered.rows}, ${tagFiltered.summary}`);
   check('summary shows filtered/total count', /\(\d+\/\d+\)/.test(tagFiltered.summary), tagFiltered.summary);
+  // Regression: removing the tag from the LAST row that carries it while
+  // filtering by that tag used to strand the panel — every row filtered
+  // away, and the chip that could switch the filter off was gone with the
+  // tag. The filter must drop tags the history no longer has.
+  const clearFilterButtonVisible = await page.evaluate(() => {
+    const clear = document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-hist-filter-clear');
+    return !!clear && clear.style.display !== 'none';
+  });
+  check('a clear-filters control is offered while filtering', clearFilterButtonVisible);
   await page.evaluate(() => {
     const shadow = document.getElementById('gejq-host').shadowRoot;
-    Array.from(shadow.querySelectorAll('.gejq-hist-tags .gejq-chip')).find((c) => c.textContent === '#counts').click();
+    const row = shadow.querySelector('.gejq-query-history .gejq-example');
+    Array.from(row.querySelectorAll('.gejq-icon-mini')).find((b) => b.textContent === '🏷').click();
   });
-  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    const input = shadow.querySelector('.gejq-query-history .gejq-tag-input');
+    input.value = ''; // remove the only #counts tag
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  const afterTagRemoval = await page.evaluate(() => {
+    const shadow = document.getElementById('gejq-host').shadowRoot;
+    return {
+      rows: shadow.querySelectorAll('.gejq-query-history .gejq-example').length,
+      body: shadow.querySelector('.gejq-query-history').textContent,
+      chips: Array.from(shadow.querySelectorAll('.gejq-hist-tags .gejq-chip')).map((c) => c.textContent),
+      summary: Array.from(shadow.querySelectorAll('.gejq-panel details summary')).map((s) => s.textContent).find((t) => t.startsWith('Query history'))
+    };
+  });
+  check(
+    'removing the last instance of a filtered tag does not strand the list',
+    afterTagRemoval.rows === rowsBefore && !afterTagRemoval.body.includes('No saved queries match'),
+    JSON.stringify({ rows: afterTagRemoval.rows, expected: rowsBefore, summary: afterTagRemoval.summary })
+  );
+  check(
+    'the vanished tag is dropped from the filter and its chips',
+    !afterTagRemoval.chips.includes('#counts') && !/\(\d+\/\d+\)/.test(afterTagRemoval.summary || ''),
+    JSON.stringify(afterTagRemoval.chips) + ' ' + afterTagRemoval.summary
+  );
   const filterInput = page.locator('.gejq-hist-filter-text');
   await filterInput.fill('displayName');
   await page.waitForTimeout(200);

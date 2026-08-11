@@ -1013,6 +1013,12 @@
   margin-bottom: 6px;
 }
 
+/* Reset-all-filters button; sized to its glyph beside the filter inputs. */
+.gejq-hist-filter-clear {
+  align-self: center;
+  font-size: 13px;
+}
+
 .gejq-hist-filter-text {
   flex: 1;
   min-width: 0;
