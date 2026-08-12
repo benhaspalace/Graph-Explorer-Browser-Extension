@@ -1898,6 +1898,11 @@
             autoFetchControl('step');
           })
         );
+        box.appendChild(
+          button('gejq-fetch-btn', '⏭', 'Fetch every remaining page, ignoring the configured page and size limits (⏸ still stops it)', function () {
+            autoFetchControl('all');
+          })
+        );
       }
       fetchStatusView.text = el('span', 'gejq-fetch-text', '');
       box.appendChild(fetchStatusView.text);
@@ -1913,16 +1918,20 @@
     var metrics =
       fetchProgress.pages + ' pages · ' + fetchProgress.items + ' items · ' + GEJQ.formatBytes(fetchProgress.size);
     if (fetchProgress.state === 'running') {
-      fetchStatusView.text.textContent =
-        (fetchStatusView.pausePending ? 'Pausing… ' : 'Auto-fetching… ') + metrics + ' · editing paused';
+      var running = fetchStatusView.pausePending
+        ? 'Pausing… '
+        : fetchProgress.unlimited
+          ? 'Fetching to the end… ' // limits bypassed via ⏭
+          : 'Auto-fetching… ';
+      fetchStatusView.text.textContent = running + metrics + ' · editing paused';
     } else {
       var reason =
         fetchProgress.reason === 'page-limit'
-          ? ' — page limit reached; Resume or +1 continue past it'
+          ? ' — page limit reached; ▶ or +1 continue past it, ⏭ runs to the end'
           : fetchProgress.reason === 'size-limit'
-            ? ' — size limit reached; Resume or +1 continue past it'
+            ? ' — size limit reached; ▶ or +1 continue past it, ⏭ runs to the end'
             : fetchProgress.reason === 'manual'
-              ? ' — more pages available; ▶ fetches the rest, +1 one page'
+              ? ' — more pages available; ▶ fetches the rest, +1 one page, ⏭ all of them'
               : '';
       fetchStatusView.text.textContent = 'Paused at ' + metrics + reason;
     }

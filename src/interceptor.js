@@ -239,7 +239,8 @@
       items: chain.totalItems,
       size: chain.totalSize,
       state: state,
-      reason: reason || null
+      reason: reason || null,
+      unlimited: chain.unlimited === true
     });
   }
 
@@ -345,15 +346,20 @@
       pauseChain(chain, 'user');
       return;
     }
-    if (chain.pages >= chain.pageBudget) {
-      chain.nextUrl = nextUrl;
-      pauseChain(chain, 'page-limit');
-      return;
-    }
-    if (chain.totalSize > chain.sizeBudget) {
-      chain.nextUrl = nextUrl;
-      pauseChain(chain, 'size-limit');
-      return;
+    // "Run to the end" (⏭) opts out of the limit checkpoints entirely —
+    // the chain then only stops when the links run out, on an error, or
+    // when the user pauses it (⏸ stays available throughout).
+    if (!chain.unlimited) {
+      if (chain.pages >= chain.pageBudget) {
+        chain.nextUrl = nextUrl;
+        pauseChain(chain, 'page-limit');
+        return;
+      }
+      if (chain.totalSize > chain.sizeBudget) {
+        chain.nextUrl = nextUrl;
+        pauseChain(chain, 'size-limit');
+        return;
+      }
     }
     postProgress(chain, 'running');
     var controller = typeof AbortController === 'function' ? new AbortController() : null;
@@ -458,18 +464,27 @@
     }
     if (action === 'pause' && chain.state === 'running') {
       chain.pauseRequested = true;
+      chain.unlimited = false; // a later ▶ resumes with the normal budget
       abortInFlight(chain); // pause NOW — the aborted page is retried on resume
     } else if (action === 'resume' && chain.state === 'paused' && chain.nextUrl) {
       // Each resume grants a fresh budget, so a chain paused at a limit
       // can keep going as far as the user wants.
+      chain.unlimited = false;
       chain.pageBudget = chain.pages + settings.autoFetchMaxPages;
       chain.sizeBudget = chain.totalSize + settings.autoFetchMaxChars;
       chain.state = 'running';
       continueChain(chain);
     } else if (action === 'step' && chain.state === 'paused' && chain.nextUrl) {
+      chain.unlimited = false;
       chain.stepping = true;
       chain.pageBudget = Math.max(chain.pageBudget, chain.pages + 1);
       chain.sizeBudget = Math.max(chain.sizeBudget, chain.totalSize + settings.autoFetchMaxChars);
+      chain.state = 'running';
+      continueChain(chain);
+    } else if (action === 'all' && chain.state === 'paused' && chain.nextUrl) {
+      // Fetch every remaining page, ignoring the configured limits.
+      chain.unlimited = true;
+      chain.stepping = false;
       chain.state = 'running';
       continueChain(chain);
     }
@@ -513,6 +528,7 @@
       pageBudget: settings.autoFetchMaxPages,
       sizeBudget: settings.autoFetchMaxChars,
       stepping: false,
+      unlimited: false, // ⏭ sets this: run to the end, ignoring the limits
       pauseRequested: false,
       stopRequested: false,
       pausedReason: null

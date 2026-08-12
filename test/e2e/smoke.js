@@ -182,6 +182,20 @@ function check(name, ok, extra) {
     if (url.startsWith('https://graph.microsoft.com/')) {
       graphRequests.push({ url, headers: route.request().headers() });
       let body = SAMPLE_RESPONSE;
+      const manyMatch = /[?&]many=(\d+)/.exec(url);
+      if (manyMatch) {
+        // A 6-page chain: long enough that "run to the end" has to blow
+        // past a 2-page limit several times over.
+        const n = Number(manyMatch[1]);
+        body = { value: [{ id: 'm' + n, displayName: 'Many ' + n }] };
+        if (n < 6) {
+          body['@odata.nextLink'] = 'https://graph.microsoft.com/v1.0/users?many=' + (n + 1);
+        }
+        return route.fulfill({
+          contentType: 'application/json;odata.metadata=minimal',
+          body: JSON.stringify(body)
+        });
+      }
       if (url.includes('bigsingle=1')) {
         // Large single response (~1.5 MB) — exercises the interceptor's
         // direct-to-evaluator text path.
@@ -918,6 +932,44 @@ function check(name, ok, extra) {
   const metaLeftDone = await page.locator('.gejq-meta').first().innerText();
   check('left metrics slot says the result was auto-fetched', metaLeftDone.includes('auto-fetched · 3 pages'), metaLeftDone);
 
+  // 10c1b. ⏭ runs to the end: with the page limit still at 2, a 6-page
+  // chain must complete in one click — the limits are ignored, not
+  // re-applied at every checkpoint.
+  await page.evaluate(() => window.runGraphQuery('/v1.0/users?many=1'));
+  await page.waitForFunction(
+    () => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const box = shadow.querySelector('.gejq-fetch-status');
+      return box && box.style.display !== 'none' && box.textContent.includes('page limit reached');
+    },
+    { timeout: 10000 }
+  );
+  check('run-to-end control offered at a limit pause', await fetchControl('⏭'));
+  try {
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        const options = Array.from(shadow.querySelectorAll('.gejq-history-select option'));
+        const box = shadow.querySelector('.gejq-fetch-status');
+        return (
+          options.some((o) => o.textContent.includes('many=1') && o.textContent.includes('6 pages') && !o.textContent.includes('incomplete')) &&
+          (!box || box.style.display === 'none')
+        );
+      },
+      { timeout: 15000 }
+    );
+    check('⏭ fetches every remaining page past the configured limit', true);
+  } catch (e) {
+    check('⏭ fetches every remaining page past the configured limit', false, await fetchStatusText());
+  }
+  await query.fill('$.value.length');
+  await page.waitForTimeout(400);
+  check(
+    'run-to-end dataset is complete and queryable',
+    (await page.locator('.gejq-result').innerText()).trim().includes('6'),
+    await page.locator('.gejq-result').innerText()
+  );
+
   // 10c2. There is no stop button: a paused chain the user never resumes
   // simply stays paused, and turning auto-fetch off (⟳) — or running a new
   // query — closes it out. The kept dataset is labeled "(incomplete)" in
@@ -935,7 +987,11 @@ function check(name, ok, extra) {
     const shadow = document.getElementById('gejq-host').shadowRoot;
     return Array.from(shadow.querySelectorAll('.gejq-fetch-status .gejq-fetch-btn')).map((b) => b.textContent);
   });
-  check('paused chain offers only resume and step', pausedControls.join('') === '▶+1', pausedControls.join(' '));
+  check(
+    'paused chain offers resume, step, and run-to-end',
+    pausedControls.join('') === '▶+1⏭',
+    pausedControls.join(' ')
+  );
   await page.evaluate(() => document.getElementById('gejq-host').shadowRoot.querySelector('.gejq-autofetch-toggle').click());
   try {
     await page.waitForFunction(

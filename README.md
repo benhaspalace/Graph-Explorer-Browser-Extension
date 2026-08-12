@@ -75,8 +75,10 @@ status for this branch.
 - **Fetch all pages, on demand or automatically** — every paged response
   (`@odata.nextLink`) gets fetch controls on the metrics row. By default
   nothing runs by itself: the row reads "more pages available", and
-  **▶** fetches the remaining pages while **+1** fetches one page at a
-  time, building a combined dataset you can query whole. Turning the
+  **▶** fetches the remaining pages, **+1** fetches one page at a time,
+  and **⏭** runs to the end — every remaining page, ignoring the
+  configured page and size limits (⏸ still stops it at any moment) —
+  building a combined dataset you can query whole. Turning the
   **Auto-fetch all pages** setting on (⟳ next to the response list, or
   the popup) starts the chain automatically instead — the controls and
   limits are the same either way. While pages stream in, the row shows
@@ -87,7 +89,8 @@ status for this branch.
   running a new query (or turning ⟳ off mid-run) closes it out. The
   configured page-count and data-size limits (defaults: 50 pages /
   10 MB) are checkpoints, not hard stops: reaching one pauses the chain,
-  and ▶ or +1 continue past it — each resume grants a fresh budget.
+  and ▶ or +1 continue past it (each resume grants a fresh budget) while
+  ⏭ ignores them altogether.
   While a chain is running, query editing and result refreshes are on
   hold (the editor grays out); the query re-runs exactly once against
   the settled data at each pause. Once a chain ends, the same spot reads
@@ -214,7 +217,7 @@ Click the toolbar icon to open the settings popup:
 | Advanced queries | on | Visibly adds `$count=true` (URI field) + `ConsistencyLevel: eventual` (Request headers view) for `$filter`/`$search`/`$orderby` queries |
 | Auto sign-in | on | Starts the sign-in flow when you open Graph Explorer signed out |
 | Auto-fetch all pages | off | Paged responses always get ▶/+1 fetch controls; this makes the chain start automatically instead (also toggleable from the panel's ⟳ button) |
-| Auto-fetch limits | 50 pages / 10 MB | Pauses the chain at these checkpoints — ▶/+1 in the panel continue past them |
+| Auto-fetch limits | 50 pages / 10 MB | Pauses the chain at these checkpoints — ▶/+1 continue past them, ⏭ ignores them and runs to the end |
 | Show background requests | off | Reveal Graph Explorer's own requests in the response list (marked ⚙) |
 | Syntax-highlighting query editor | on | CodeMirror editor (highlighting, bracket matching, undo); turn off for a plain text box |
 | Evaluate while typing | on | Re-runs the query on every edit; turn off to evaluate only on <kbd>Enter</kbd> (the metrics row shows "↵ Enter to evaluate" while edits are pending — recommended for very large datasets) |
