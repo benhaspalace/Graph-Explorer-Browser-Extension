@@ -59,10 +59,13 @@ jobs:
           node-version: 22
       - name: Install Playwright
         # --ignore-scripts blocks lifecycle scripts (a common supply-chain
-        # vector); the browser is then fetched explicitly below. Pinned to an
-        # exact version so the toolchain is reproducible.
+        # vector); the browser is then fetched explicitly below. The version
+        # comes from package.json's devDependencies (an exact pin, so the
+        # toolchain is reproducible and Dependabot has one place to bump).
         run: |
-          npm install --no-save --ignore-scripts --no-audit --no-fund playwright@1.56.1
+          version="$(node -p "require('./package.json').devDependencies.playwright")"
+          echo "Installing playwright@$version (pinned in package.json)"
+          npm install --no-save --ignore-scripts --no-audit --no-fund "playwright@$version"
           npx playwright install --with-deps chromium
       - name: Run smoke test (offline, route-intercepted)
         run: npm run e2e

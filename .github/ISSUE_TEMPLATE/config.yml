@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/security/advisories/new
+    about: Never file security issues publicly — use GitHub's private vulnerability reporting. See SECURITY.md.
+  - name: Query-language help (JMESPath / JSONPath / jq)
+    url: https://github.com/benhaspalace/Graph-Explorer-Browser-Extension#choosing-a-query-language
+    about: Which language to reach for, what each one cannot do, and links to the upstream docs.
+  - name: Microsoft Graph Explorer itself
+    url: https://developer.microsoft.com/en-us/graph/graph-explorer
+    about: Problems with Graph Explorer or the Graph API are not extension bugs — report those to Microsoft.

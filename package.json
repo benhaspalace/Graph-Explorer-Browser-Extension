@@ -4,6 +4,18 @@
   "private": true,
   "description": "Browser extension (Chrome/Edge) adding JMESPath/JSONPath query capabilities to Microsoft Graph Explorer results.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/benhaspalace/Graph-Explorer-Browser-Extension.git"
+  },
+  "homepage": "https://github.com/benhaspalace/Graph-Explorer-Browser-Extension#readme",
+  "bugs": {
+    "url": "https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/issues"
+  },
+  "//": "No dependencies: the shipped extension has zero runtime npm packages (see vendor/ + SBOM.md). devDependencies holds the one build/test tool, pinned to an exact version — this is its single source of truth, so GitHub's dependency graph and Dependabot can see it and .github/workflows/build.yml installs exactly this version.",
+  "devDependencies": {
+    "playwright": "1.56.1"
+  },
   "scripts": {
     "pretest": "node scripts/verify-vendor.js",
     "test": "node --test 'test/*.test.js'",

@@ -1,0 +1,58 @@
+name: Feature request
+description: Suggest a capability for the JSON Query panel
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are welcome. Two constraints shape what can land: the extension
+        runs **entirely locally** with no telemetry, no dynamic code, no
+        runtime npm dependencies, and the minimum permissions
+        (`storage` + `developer.microsoft.com`) — see
+        [SECURITY.md](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/blob/main/SECURITY.md);
+        and it never modifies the Graph requests you run.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The task or friction behind the request, not just the proposed solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like the extension to do
+      description: >
+        Where it would live in the UI (query box, footer, response list,
+        settings, popup) if you have a preference.
+    validations:
+      required: true
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Example
+      description: >
+        A concrete case — the Graph request, the query, and the result you
+        would want. Redact or synthesize any tenant data.
+      render: text
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have tried
+      description: >
+        Another query language, a different view (JSON / CSV / Tree), the
+        Graph query equivalent (⇗), diff (⇄), or pinning a result (📌).
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and the README's feature list.
+          required: true
+        - label: This does not require the extension to send data anywhere or take new permissions.
+          required: false
