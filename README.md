@@ -294,6 +294,10 @@ engine covers core jq, without the regex builtins).
   ([jsonpath-plus](https://github.com/JSONPath-Plus/JSONPath) 10.3.0, MIT),
   and `vendor/jqts.js` ([jqts](https://github.com/kentdotn/jqts) 0.0.8, MIT —
   a pure-JS jq clone covering core jq; no WASM needed) evaluate the queries.
+- [`docs/dependency-graph.md`](docs/dependency-graph.md) draws the whole
+  picture: which file loads, messages, or depends on which (runtime,
+  third-party, and build/release), and what GitHub's own dependency graph
+  shows for this repository.
 - `vendor/codemirror.js` is a bundled [CodeMirror 6](https://codemirror.net)
   (MIT) that powers the default syntax-highlighting query editor; the
   tokenizers for the three query languages are the extension's own
@@ -389,10 +393,28 @@ vendor/CHECKSUMS.txt   Pinned SHA-256 of each vendored bundle
 popup/                 Toolbar popup: instructions + settings
 scripts/make-icons.js  Icon generator (no dependencies)
 scripts/verify-vendor.js  Vendored-dependency integrity check (no deps)
-test/                  Unit tests (`node --test`)
+test/                  Unit tests (`node --test`) + offline e2e smoke test
+docs/dependency-graph.md  Module, dependency, and build graphs (Mermaid)
+CONTRIBUTING.md        Dev setup, code style, security invariants, releases
+CODE_OF_CONDUCT.md     Contributor Covenant 2.1 + no-tenant-data rule
 SECURITY.md            Security model, supply-chain controls, reporting
 SBOM.md                Software bill of materials
+.github/               CI workflow, Dependabot, issue + PR templates
 ```
+
+## Contributing
+
+Bug reports, fixes, and well-scoped features are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup (no build step), the
+checks to run, the code style, and the security invariants a change has to
+keep. Participation is covered by the
+[Code of Conduct](CODE_OF_CONDUCT.md); vulnerabilities go through the private
+reporting flow in [SECURITY.md](SECURITY.md), never a public issue.
+
+One rule matters more than the rest: **never paste real tenant data** — tokens,
+cookies, user or tenant identifiers, mail addresses, or raw Graph responses —
+into an issue, pull request, or screenshot. Graph Explorer's sample tenant
+(available when signed out) makes shareable reproductions easy.
 
 ## Future ideas
 

@@ -8,6 +8,8 @@ bundle under `vendor/`, and its integrity is verified on every build
 
 Regenerate the hash column after an intentional bundle update with
 `npm run vendor:hash` and review the diff.
+[`docs/dependency-graph.md`](docs/dependency-graph.md) draws how these
+components and the extension's own files depend on each other.
 
 ## Shipped in the extension (runtime)
 
@@ -39,12 +41,16 @@ part of the CodeMirror bundle.
 
 | Component | Version | Purpose | Notes |
 | --- | --- | --- | --- |
-| playwright | 1.56.1 (pinned) | Offline end-to-end smoke test | Installed ad hoc in CI with `--ignore-scripts`; not a dependency of the extension and not present in any release artifact |
+| playwright | 1.56.1 (pinned) | Offline end-to-end smoke test | Exact pin in `package.json` → `devDependencies`; installed ad hoc in CI with `--ignore-scripts` at that version; not a dependency of the extension and not present in any release artifact |
 | Node.js | 22 (CI) | Runs the unit tests (`node:test`) and build scripts | No other test framework |
+| GitHub Actions | pinned to commit SHAs | CI/CD (`.github/workflows/build.yml`) | Kept current by Dependabot; visible in GitHub's dependency graph |
 
 There is intentionally **no `package-lock.json`**: the shipped extension has
 zero npm dependencies, and the only build/test tool (Playwright) is pinned by
-exact version at its single install site.
+exact version in `package.json`, which the workflow reads when installing it —
+one source of truth, so a Dependabot bump moves the whole toolchain. Because
+there is no lockfile, GitHub's dependency graph lists direct dependencies only,
+which here is the complete set.
 
 ## Verifying this SBOM against a checkout or a release
 

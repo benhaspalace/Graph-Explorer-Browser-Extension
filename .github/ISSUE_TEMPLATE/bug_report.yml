@@ -1,0 +1,106 @@
+name: Bug report
+description: Something in the JSON Query panel does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Please redact everything you paste.** No access
+        tokens, cookies, tenant or user IDs, real mail addresses, or raw Graph
+        responses — Graph Explorer's sample tenant (available when signed out)
+        is the easiest way to build a shareable reproduction.
+
+        Found a security vulnerability? Do not file it here — use the private
+        reporting flow in [SECURITY.md](https://github.com/benhaspalace/Graph-Explorer-Browser-Extension/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence that shows the problem.
+      placeholder: |
+        1. Run `GET /v1.0/users?$top=5` in Graph Explorer
+        2. Type `value[].displayName` in the query box
+        3. Switch the footer to CSV
+        4. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: query
+    attributes:
+      label: Query and response shape
+      description: >
+        The query text, plus the *shape* of the response it ran against — a
+        redacted or synthetic snippet, or just the structure
+        (`{ value: [ { id, displayName, mail } ] }`). Never paste real tenant
+        data.
+      render: text
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: Query language
+      options:
+        - JMESPath (default)
+        - JSONPath
+        - jq
+        - Not language-specific / don't know
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Extension version
+      description: From `chrome://extensions` (or `edge://extensions`), or the version in `manifest.json`.
+      placeholder: "0.22.0"
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      placeholder: "Chrome 141 on Windows 11 / Edge 141 on macOS 15"
+    validations:
+      required: true
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Console errors
+      description: >
+        Anything red in DevTools on the Graph Explorer tab (and, if relevant,
+        the service-worker console from the extensions page). Redact URLs that
+        contain identifiers.
+      render: text
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: >
+        Settings that differ from the defaults, dataset size, whether
+        auto-fetch was running, screenshots (redacted), a non-English browser
+        locale.
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: I am on the latest release, or I checked that the issue still exists there.
+          required: true
+        - label: I searched the existing issues.
+          required: true
+        - label: This report contains no access tokens, cookies, or real tenant data.
+          required: true
