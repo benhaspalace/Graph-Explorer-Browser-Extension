@@ -859,6 +859,66 @@ function check(name, ok, extra) {
     check('resume after pause re-fetches the aborted page and completes', false, e.message.split('\n')[0]);
   }
 
+  // 10b3. A newer query superseding a RUNNING chain closes it out cleanly:
+  // the in-flight page fetch is aborted (the superseded chain must not
+  // keep fetching pages as a zombie), the progress/lock state clears, and
+  // the panel follows the new query's own chain — regression for the panel
+  // getting stuck on "editing paused" and never showing the new response.
+  const supersedeStart = graphRequests.length;
+  await page.evaluate(() => window.runGraphQuery('/v1.0/users?pagedslow=1'));
+  await page.waitForFunction(
+    () => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const box = shadow.querySelector('.gejq-fetch-status');
+      return box && box.style.display !== 'none' && box.textContent.includes('Auto-fetching');
+    },
+    { timeout: 10000 }
+  );
+  // The slow page (pagedslow=2, 1500 ms) is now in flight — run a new query.
+  await page.evaluate(() => window.runGraphQuery('/v1.0/users?paged=1'));
+  try {
+    await page.waitForFunction(
+      () => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        const box = shadow.querySelector('.gejq-fetch-status');
+        const text = (shadow.querySelector('.gejq-response-text') || {}).value || '';
+        return (!box || box.style.display === 'none') && text.includes('paged=1') && text.includes('3 pages');
+      },
+      { timeout: 10000 }
+    );
+    check('superseding query completes its own chain and clears the fetch state', true);
+  } catch (e) {
+    check(
+      'superseding query completes its own chain and clears the fetch state',
+      false,
+      await page.evaluate(() => {
+        const shadow = document.getElementById('gejq-host').shadowRoot;
+        const box = shadow.querySelector('.gejq-fetch-status');
+        return (box ? box.textContent : '') + ' | ' + ((shadow.querySelector('.gejq-response-text') || {}).value || '');
+      })
+    );
+  }
+  check(
+    'editor unlocked after the supersede',
+    await page.evaluate(() => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      return !shadow.querySelector('.gejq-query-input').classList.contains('gejq-query-locked');
+    })
+  );
+  await query.fill('$.value.length');
+  await page.waitForTimeout(400);
+  check(
+    'panel queries the superseding chain’s aggregated dataset',
+    (await page.locator('.gejq-result').innerText()).trim().includes('9')
+  );
+  await page.waitForTimeout(2000); // a zombie chain would keep fetching in this window
+  const supersedeUrls = graphRequests.slice(supersedeStart).map((r) => r.url);
+  check(
+    'superseded chain stopped fetching (pagedslow=3 never requested)',
+    !supersedeUrls.some((u) => u.includes('pagedslow=3')),
+    supersedeUrls.join(' ').replace(/https:\/\/graph\.microsoft\.com\/v1\.0\/users/g, '…')
+  );
+
   // 10c. Reaching the auto-fetch page limit PAUSES the chain (with resume/
   // step/stop controls on the metrics row) instead of ending it.
   await popup.fill('#setting-auto-fetch-pages', '2');

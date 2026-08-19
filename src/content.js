@@ -1640,8 +1640,11 @@
     }
     var visible = !entry.background || state.settings.showBackgroundRequests;
     // Keep the selection on the newest live response while following, but
-    // never auto-jump onto a manual pinned-result snapshot.
-    if (state.followLatest && visible && !entry.manual) {
+    // never auto-jump onto a manual pinned-result snapshot. An in-place
+    // update (a chain entry re-posting as pages accumulate — including a
+    // superseded chain closing out after a newer query already arrived)
+    // only keeps the selection it already has; it must not steal it.
+    if (state.followLatest && visible && !entry.manual && (!replaced || state.selectedId === entry.id)) {
       state.selectedId = entry.id;
     }
     if (ui) {
