@@ -308,6 +308,10 @@
       return;
     }
     chain.state = 'done';
+    // A page fetch may still be in flight (e.g. a newer query superseding
+    // a running chain) — abort it, or its success handler would keep the
+    // closed-out chain fetching pages and posting progress forever.
+    abortInFlight(chain);
     if (chain.streamed && chain.pages < 2) {
       // Nothing will be posted — free the pages staged in the evaluator.
       sendToEvaluator({ type: 'gejq-chain-abort', id: chain.id });
@@ -323,6 +327,9 @@
   }
 
   function continueChain(chain) {
+    if (chain.state === 'done') {
+      return; // closed out while a page was in flight
+    }
     var nextUrl = chain.nextUrl;
     chain.nextUrl = null;
     var parsed;
@@ -399,6 +406,9 @@
           .text()
           .then(function (text) {
             chain.abortController = null;
+            if (chain.state === 'done') {
+              return; // closed out while this page was in flight — drop it
+            }
             var pageJson;
             try {
               pageJson = JSON.parse(text);
