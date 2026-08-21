@@ -2723,11 +2723,46 @@
   // headers (GE re-adds those itself on every request).
   var DROPPED_REQUEST_HEADERS = ['authorization', 'cookie', 'sdkversion', 'client-request-id'];
 
+  // Comma-separated headers whose Graph-Explorer-added directives are
+  // stripped token by token: whatever the user typed themselves survives,
+  // and the header is dropped only when nothing of theirs remains. GE
+  // sends `Prefer: ms-graph-dev-mode` plus cache-busting
+  // `Cache-Control`/`Pragma: no-cache` on every request; restoring those
+  // into the Request-headers view was noise nobody asked for, while a
+  // hand-typed `Cache-Control: max-age=0` is worth keeping.
+  var STRIPPED_HEADER_TOKENS = {
+    prefer: ['ms-graph-dev-mode'],
+    'cache-control': ['no-cache', 'no-store'],
+    pragma: ['no-cache']
+  };
+
+  /** Split a comma-separated header value, ignoring commas inside "…". */
+  function splitHeaderTokens(value) {
+    var tokens = [];
+    var current = '';
+    var quoted = false;
+    for (var i = 0; i < value.length; i++) {
+      var ch = value[i];
+      if (ch === '"') {
+        quoted = !quoted;
+        current += ch;
+      } else if (ch === ',' && !quoted) {
+        tokens.push(current.trim());
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    tokens.push(current.trim());
+    return tokens;
+  }
+
   /**
    * Reduce a request's headers to the ones worth remembering and
    * restoring: credentials and Graph Explorer telemetry are dropped, and
-   * GE's always-added `ms-graph-dev-mode` preference is stripped out of
-   * the Prefer header (kept only if the user added their own tokens).
+   * the directives GE adds to `Prefer`, `Cache-Control` and `Pragma` are
+   * stripped out of those headers' values (each is kept only when the
+   * user's own tokens remain — see STRIPPED_HEADER_TOKENS).
    * Input and output are arrays of { name, value }.
    */
   function sanitizeRequestHeaders(pairs) {
@@ -2742,23 +2777,67 @@
         return;
       }
       var value = pair.value;
-      if (lower === 'prefer') {
-        value = value
-          .split(',')
-          .map(function (token) {
-            return token.trim();
-          })
+      var strip = STRIPPED_HEADER_TOKENS[lower];
+      if (strip) {
+        value = splitHeaderTokens(value)
           .filter(function (token) {
-            return token !== '' && token !== 'ms-graph-dev-mode';
+            return token !== '' && strip.indexOf(token.toLowerCase()) === -1;
           })
           .join(', ');
         if (value === '') {
-          return;
+          return; // nothing the user added — drop the header entirely
         }
       }
       out.push({ name: name, value: value });
     });
     return out;
+  }
+
+  /** True when two { name, value } lists are element-wise identical. */
+  function sameHeaderList(a, b) {
+    if (!Array.isArray(a) || a.length !== b.length) {
+      return false;
+    }
+    for (var i = 0; i < b.length; i++) {
+      if (!a[i] || a[i].name !== b[i].name || a[i].value !== b[i].value) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Re-run header sanitization over a stored query history. Entries saved
+   * by older versions predate the current drop/strip rules (and imported
+   * libraries were never sanitized at all), so their headers are cleaned
+   * on load rather than replayed into Graph Explorer as-is. Returns
+   * { list, changed } — `changed` lets the caller persist only when
+   * something was actually rewritten. Never mutates the input.
+   */
+  function sanitizeQueryHistory(list) {
+    var changed = false;
+    var out = (Array.isArray(list) ? list : []).map(function (entry) {
+      if (!entry || !entry.context || typeof entry.context !== 'object') {
+        return entry;
+      }
+      var headers = sanitizeRequestHeaders(entry.context.headers);
+      if (sameHeaderList(entry.context.headers, headers)) {
+        return entry;
+      }
+      changed = true;
+      var context = {};
+      Object.keys(entry.context).forEach(function (key) {
+        context[key] = entry.context[key];
+      });
+      context.headers = headers;
+      var copy = {};
+      Object.keys(entry).forEach(function (key) {
+        copy[key] = entry[key];
+      });
+      copy.context = context;
+      return copy;
+    });
+    return { list: out, changed: changed };
   }
 
   /**
@@ -3399,6 +3478,7 @@
     queryCompletions: queryCompletions,
     isBackgroundGraphRequest: isBackgroundGraphRequest,
     sanitizeRequestHeaders: sanitizeRequestHeaders,
+    sanitizeQueryHistory: sanitizeQueryHistory,
     graphRequestMatchesEditor: graphRequestMatchesEditor,
     classifyBackgroundRequest: classifyBackgroundRequest,
     applyAdvancedQuery: applyAdvancedQuery,

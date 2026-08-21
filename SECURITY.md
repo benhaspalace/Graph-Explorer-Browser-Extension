@@ -25,9 +25,15 @@ within a few business days.
   Graph JSON responses for display; it never rewrites requests or responses.
 - **No credentials are read or stored.** Captured request headers are
   sanitized before anything leaves the page's MAIN world: `Authorization`,
-  `Cookie`, `SdkVersion`, and `client-request-id` are always dropped, and
-  `ms-graph-dev-mode` is stripped from `Prefer`. Access tokens and the user's
-  MSAL/session storage are never read for their values or persisted.
+  `Cookie`, `SdkVersion`, and `client-request-id` are always dropped, and the
+  directives Graph Explorer adds itself are stripped from the values of
+  `Prefer` (`ms-graph-dev-mode`), `Cache-Control` and `Pragma` (`no-cache`,
+  `no-store`) — each header is kept only when tokens the user typed remain.
+  Access tokens and the user's MSAL/session storage are never read for their
+  values or persisted. The same sanitization is re-applied to the stored query
+  history when it is loaded and to any imported query library, so nothing that
+  predates a rule (or arrives in a file) is replayed into Graph Explorer's
+  request editor unchecked.
 - **No dynamic code execution.** There is no `eval`, `new Function`, remote
   script loading, or `innerHTML`/`insertAdjacentHTML`/`document.write` in the
   extension's own code (`src/**`). The UI is built in a ShadowRoot exclusively

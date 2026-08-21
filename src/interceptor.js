@@ -587,8 +587,9 @@
 
   /**
    * The request's own headers as sanitized {name, value} pairs — never
-   * including Authorization/cookies (see sanitizeRequestHeaders). Used
-   * so the panel can restore a query's headers later.
+   * including Authorization/cookies, Graph Explorer's telemetry, or the
+   * cache-busting directives it adds itself (see sanitizeRequestHeaders).
+   * Used so the panel can restore a query's headers later.
    */
   function capturedRequestHeaders(input, init) {
     try {

@@ -106,7 +106,8 @@ status for this branch.
   button re-populates Graph Explorer's request editor with the saved request:
   URL (query parameters included), method (selected through GE's own
   dropdown), the request's sanitized headers (re-added through the
-  Request-headers view), and — for requests that had one — the body, copied
+  Request-headers view, skipping any header already shown there), and —
+  for requests that had one — the body, copied
   to your clipboard to paste into the Request-body tab. Everything happens in
   place — no page reload, so your sign-in session is untouched.
 - **Favorites, tags, and filtering** — star ★ a saved query to pin it
@@ -315,9 +316,13 @@ in the extension's hidden evaluator frame — and are cleared on reload. What is
 persisted via `chrome.storage.local`: your settings, your last query text,
 panel state, and the query history (query text, language, timestamp, and the
 method, URL, and sanitized headers of the Graph request it ran against —
-never response data). Header sanitization always drops `Authorization`,
-cookies, and Graph Explorer's telemetry headers before anything is kept, so
-access tokens are never read or stored.
+never response data). Header sanitization always drops `Authorization` and
+cookies, so access tokens are never read or stored, and it strips the
+headers Graph Explorer adds on its own behalf — its telemetry
+(`SdkVersion`, `client-request-id`), its `ms-graph-dev-mode` preference, and
+its cache-busting `Cache-Control`/`Pragma: no-cache` — keeping only the parts
+you typed yourself, so restoring a saved request never brings back noise you
+did not add.
 
 ### Security & supply chain
 
