@@ -682,6 +682,67 @@ test('graphRequestMatchesEditor tolerates encoding and injected $count', () => {
   );
   assert.equal(GEJQ.graphRequestMatchesEditor('https://graph.microsoft.com/v1.0/me', ''), false);
   assert.equal(GEJQ.graphRequestMatchesEditor('not a url', 'https://graph.microsoft.com/v1.0/me'), false);
+  // Field-side $count=true (the assist can insert it just after the
+  // request was sent without it) is tolerated, like the captured side.
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor(
+      "https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'a')",
+      "https://graph.microsoft.com/v1.0/users?$count=true&$filter=startswith(displayName,'a')"
+    ),
+    true
+  );
+  // A method prefix pasted into the field doesn't break the match.
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor(
+      'https://graph.microsoft.com/v1.0/users?$top=5',
+      'GET https://graph.microsoft.com/v1.0/users?$top=5'
+    ),
+    true
+  );
+  // Nested query options survive encoding (the $expand($select=…) shape).
+  assert.equal(
+    GEJQ.graphRequestMatchesEditor(
+      'https://graph.microsoft.com/v1.0/identityGovernance/entitlementManagement/assignmentPolicies?%24select=id%2CdisplayName&%24expand=accessPackage(%24select%3Did%2CdisplayName)&%24count=true',
+      'https://graph.microsoft.com/v1.0/identityGovernance/entitlementManagement/assignmentPolicies?$select=id,displayName&$expand=accessPackage($select=id,displayName)&$count=true'
+    ),
+    true
+  );
+});
+
+test('graphRequestPathMatchesEditor matches the resource path, params aside', () => {
+  const CAPTURED = 'https://graph.microsoft.com/v1.0/users?$select=id,displayName&$count=true';
+  assert.equal(GEJQ.graphRequestPathMatchesEditor(CAPTURED, 'https://graph.microsoft.com/v1.0/users?$top=10'), true);
+  assert.equal(GEJQ.graphRequestPathMatchesEditor(CAPTURED, 'GET https://graph.microsoft.com/v1.0/users'), true);
+  assert.equal(GEJQ.graphRequestPathMatchesEditor(CAPTURED, 'https://graph.microsoft.com/v1.0/users/x'), false);
+  assert.equal(GEJQ.graphRequestPathMatchesEditor(CAPTURED, 'https://graph.microsoft.com/beta/users'), false);
+  assert.equal(GEJQ.graphRequestPathMatchesEditor(CAPTURED, ''), false);
+  assert.equal(GEJQ.graphRequestPathMatchesEditor('not a url', 'https://graph.microsoft.com/v1.0/users'), false);
+});
+
+test('splitMethodPrefix splits a pasted method + URI, and nothing else', () => {
+  assert.deepEqual(GEJQ.splitMethodPrefix('GET https://graph.microsoft.com/v1.0/me'), {
+    method: 'GET',
+    uri: 'https://graph.microsoft.com/v1.0/me'
+  });
+  assert.deepEqual(GEJQ.splitMethodPrefix('  patch   /v1.0/users/x  '), {
+    method: 'PATCH',
+    uri: '/v1.0/users/x'
+  });
+  assert.deepEqual(GEJQ.splitMethodPrefix('DELETE v1.0/users/x'), {
+    method: 'DELETE',
+    uri: 'v1.0/users/x'
+  });
+  assert.deepEqual(GEJQ.splitMethodPrefix("POST beta/users?$filter=name eq 'x'"), {
+    method: 'POST',
+    uri: "beta/users?$filter=name eq 'x'"
+  });
+  // No prefix, unknown methods, or a remainder that isn't a URI: untouched.
+  assert.equal(GEJQ.splitMethodPrefix('https://graph.microsoft.com/v1.0/me'), null);
+  assert.equal(GEJQ.splitMethodPrefix('HEAD https://graph.microsoft.com/v1.0/me'), null);
+  assert.equal(GEJQ.splitMethodPrefix('GET some words'), null);
+  assert.equal(GEJQ.splitMethodPrefix('GET '), null);
+  assert.equal(GEJQ.splitMethodPrefix(''), null);
+  assert.equal(GEJQ.splitMethodPrefix(null), null);
 });
 
 test('classifyBackgroundRequest combines pattern, editor, and run signals', () => {
@@ -700,6 +761,15 @@ test('classifyBackgroundRequest combines pattern, editor, and run signals', () =
   assert.equal(GEJQ.classifyBackgroundRequest('https://graph.microsoft.com/v1.0/whatever', USERS, -1), true);
   // …but a recent run rescues unknown non-pattern URLs (field edited).
   assert.equal(GEJQ.classifyBackgroundRequest('https://graph.microsoft.com/v1.0/whatever', USERS, 500), false);
+  // Same resource path with different query options stays visible even
+  // without a tracked run — the user is iterating on the parameters.
+  assert.equal(
+    GEJQ.classifyBackgroundRequest('https://graph.microsoft.com/v1.0/users?$top=99', USERS, -1),
+    false
+  );
+  // The path rule never rescues known-internal patterns: a plain /me
+  // while the field holds /me?$select=… still needs a recent run.
+  assert.equal(GEJQ.classifyBackgroundRequest(ME, ME + '?$select=id', -1), true);
 });
 
 test('clampInt clamps numbers and numeric strings, falls back otherwise', () => {
