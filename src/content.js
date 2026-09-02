@@ -2262,6 +2262,67 @@
   }
 
   /**
+   * The part of the page holding the request editor and its header rows.
+   * Graph Explorer renders added rows *outside* the tab panel that owns
+   * the key/value inputs, so presence checks need this wider scope —
+   * while still excluding the response view, whose "Response headers"
+   * list would otherwise look like a request header row.
+   */
+  function requestHeadersRegion() {
+    var byId = document.getElementById('request-area');
+    if (byId) {
+      return byId;
+    }
+    var inputs = findHeaderInputs();
+    var panel = inputs && inputs.name.closest ? inputs.name.closest('[role="tabpanel"]') : null;
+    if (panel && panel.parentElement) {
+      return panel.parentElement;
+    }
+    var tab = findHeadersTab();
+    return tab && tab.parentElement ? tab.parentElement.parentElement || tab.parentElement : null;
+  }
+
+  /**
+   * True when Graph Explorer already shows a request-header row for
+   * `name` — whether it renders rows as text ("ConsistencyLevel:
+   * eventual") or as editable key inputs. Used so neither the assist nor
+   * a saved-query restore ever adds a second row for a header that is
+   * already there.
+   */
+  function headerRowPresent(name) {
+    var region = requestHeadersRegion();
+    if (!region) {
+      return false;
+    }
+    var responseArea = document.getElementById(EMBED_ANCHOR_ID);
+    var lower = name.toLowerCase();
+    var pattern = new RegExp('(^|[\\s,;])' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:', 'i');
+    var entry = findHeaderInputs();
+    var i;
+    var textNodes = region.querySelectorAll('li, tr, td, th, div, span, p, label');
+    for (i = 0; i < textNodes.length; i++) {
+      var node = textNodes[i];
+      if (node.children.length > 0 || (responseArea && responseArea.contains(node))) {
+        continue; // containers and the response view are not header rows
+      }
+      if (pattern.test(node.textContent || '')) {
+        return true;
+      }
+    }
+    var valueInputs = region.querySelectorAll('input');
+    for (i = 0; i < valueInputs.length; i++) {
+      var input = valueInputs[i];
+      if (entry && (input === entry.name || input === entry.value)) {
+        continue; // the new-header entry fields, not an existing row
+      }
+      if ((input.value || '').trim().toLowerCase() === lower) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Add header rows through Graph Explorer's Request-headers tab so they
    * are visible (and persisted by GE) exactly like hand-entered ones.
    * Everything is asynchronous and defensive: the panel mounts only
@@ -2276,8 +2337,14 @@
       if (headersInFlight[row.name]) {
         return false; // an add for this header is already running
       }
+      if (headerRowPresent(row.name)) {
+        return false; // Graph Explorer already shows a row for it
+      }
       if (force) {
-        return true; // restore regardless of this session's earlier assists
+        // A restore retries even when this session's guard claims the row
+        // was added — the guard is set optimistically on click, so it can
+        // be set for a row that never actually appeared.
+        return true;
       }
       try {
         return !sessionStorage.getItem(HEADER_ADDED_GUARD_PREFIX + row.name);
@@ -2336,7 +2403,9 @@
       var row = pending[index];
       waitForCondition(findHeaderInputs, 10, function (inputs) {
         var panelRoot = inputs.name.closest('[role="tabpanel"]') || inputs.name.parentElement.parentElement;
-        if (panelRoot && panelRoot.textContent.indexOf(row.name) !== -1) {
+        // Re-check now that the headers tab is open and its rows rendered
+        // (the filter above ran before the tab was clicked).
+        if (headerRowPresent(row.name)) {
           markHeaderAdded(row.name); // already present
           addNext(index + 1);
           return;
@@ -2457,8 +2526,12 @@
     setNativeInputValue(input, url);
     input.focus();
     ensureMethodSelected(method);
-    if (headers && headers.length > 0) {
-      ensureHeaderRows(headers, { force: true });
+    // Last line of defense before writing rows into Graph Explorer's own
+    // UI: drops anything the current rules exclude and any malformed pair
+    // (ensureHeaderRows dereferences row.name).
+    var safeHeaders = GEJQ.sanitizeRequestHeaders(headers);
+    if (safeHeaders.length > 0) {
+      ensureHeaderRows(safeHeaders, { force: true });
     }
     if (typeof body === 'string' && body !== '') {
       // GE's request body lives in a Monaco editor, which can't be set
@@ -2563,7 +2636,9 @@
               ? {
                   method: typeof item.context.method === 'string' ? item.context.method : 'GET',
                   url: item.context.url,
-                  headers: Array.isArray(item.context.headers) ? item.context.headers : [],
+                  // Imported libraries are untrusted input — sanitize
+                  // rather than trusting whatever the file carries.
+                  headers: GEJQ.sanitizeRequestHeaders(item.context.headers),
                   body: typeof item.context.body === 'string' ? item.context.body : ''
                 }
               : null,
@@ -3873,14 +3948,11 @@
         lastRunInteraction ? Date.now() - lastRunInteraction : -1
       );
     }
-    var requestHeaders = [];
-    if (Array.isArray(payload.requestHeaders)) {
-      payload.requestHeaders.forEach(function (pair) {
-        if (requestHeaders.length < 20 && pair && typeof pair.name === 'string' && typeof pair.value === 'string') {
-          requestHeaders.push({ name: pair.name, value: pair.value });
-        }
-      });
-    }
+    // Same type and count checks as before, plus the name/value filtering
+    // — the interceptor already sanitized (this is idempotent), so the
+    // only thing this adds is that a page script posting a look-alike
+    // message cannot smuggle headers past the rules.
+    var requestHeaders = GEJQ.sanitizeRequestHeaders(payload.requestHeaders);
     addResponse({
       id: payload.id,
       method: typeof payload.method === 'string' ? payload.method : 'GET',
@@ -3960,9 +4032,17 @@
             state.copyFormat = items[STORAGE_KEY_COPY_FORMAT] === 'tsv' ? 'tsv' : 'csv';
             state.splitPct = GEJQ.clampInt(items[STORAGE_KEY_SPLIT], 15, 85, 50);
             state.settings = GEJQ.normalizeSettings(items[STORAGE_KEY_SETTINGS]);
-            state.queryHistory = Array.isArray(items[STORAGE_KEY_QUERY_HISTORY])
-              ? items[STORAGE_KEY_QUERY_HISTORY]
-              : [];
+            // Re-sanitize the stored history: entries saved by older
+            // versions predate the current header rules (Graph Explorer's
+            // cache-busting Pragma/Cache-Control used to be kept and then
+            // replayed into its Request-headers view on Load ↗), and an
+            // imported library was never sanitized at all. Persist only
+            // when something was actually rewritten.
+            var migrated = GEJQ.sanitizeQueryHistory(items[STORAGE_KEY_QUERY_HISTORY]);
+            state.queryHistory = migrated.list;
+            if (migrated.changed) {
+              storageSet(STORAGE_KEY_QUERY_HISTORY, state.queryHistory);
+            }
             buildUi(css);
             var savedQuery = items[STORAGE_KEY_QUERY];
             if (savedQuery && state.query === '') {

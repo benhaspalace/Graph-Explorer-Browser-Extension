@@ -70,6 +70,10 @@ const FIXTURE_HTML = `<!DOCTYPE html>
         SdkVersion: 'GraphExplorer/4.0',
         prefer: 'ms-graph-dev-mode',
         Authorization: 'Bearer secret-token',
+        // Graph Explorer sends cache-busting directives on every request;
+        // they must never be captured or restored into the headers view.
+        Pragma: 'no-cache',
+        'cache-control': 'no-cache',
         'x-demo': 'yes'
       }
     }).then(r => r.json()).then(j => {
@@ -740,6 +744,19 @@ function check(name, ok, extra) {
     'Authorization is never captured or restored',
     restoredHeaders.every((h) => !h.toLowerCase().includes('authorization') && !h.includes('secret-token'))
   );
+  // Graph Explorer's own cache-busting directives must not come back.
+  check(
+    'cache-control / pragma are never restored',
+    restoredHeaders.every((h) => !/^\s*(pragma|cache-control)\s*:/i.test(h)),
+    restoredHeaders.join(' | ')
+  );
+  // …and nothing already present is added a second time.
+  const duplicateRows = restoredHeaders.filter((h) => /^\s*(ConsistencyLevel|Content-Type)\s*:/i.test(h));
+  check(
+    'Load does not duplicate headers already in the view',
+    duplicateRows.length === new Set(duplicateRows.map((h) => h.split(':')[0].toLowerCase())).size,
+    restoredHeaders.join(' | ')
+  );
   // A differing method is restored via GE's own method dropdown.
   await page.evaluate(() => {
     document.getElementById('ge-method').textContent = 'POST';
@@ -752,6 +769,87 @@ function check(name, ok, extra) {
     'Load restores the saved method via the dropdown',
     (await page.evaluate(() => document.getElementById('ge-method').textContent.trim())) === 'GET'
   );
+
+  // 10b1b. Queries saved by an OLDER version still carry the cache
+  // directives in chrome.storage.local. Seed such an entry, reload the
+  // page, and prove the migration cleans it: Load ↗ restores the real
+  // header only, and the stored value itself no longer holds the noise.
+  {
+    const seeder = await ctx.newPage();
+    await seeder.goto(extOrigin + '/popup/popup.html');
+    await seeder.evaluate(() =>
+      new Promise((resolve) => {
+        chrome.storage.local.set(
+          {
+            'gejq.queryHistory': [
+              {
+                query: '.value | length',
+                language: 'jq',
+                lastUsed: Date.now(),
+                uses: 1,
+                starred: false,
+                tags: [],
+                label: '',
+                context: {
+                  method: 'GET',
+                  url: 'https://graph.microsoft.com/v1.0/users?legacy=1',
+                  headers: [
+                    { name: 'cache-control', value: 'no-cache' },
+                    { name: 'Pragma', value: 'no-cache' },
+                    { name: 'x-legacy', value: 'keep' }
+                  ],
+                  body: ''
+                }
+              }
+            ]
+          },
+          resolve
+        );
+      })
+    );
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => {
+      const host = document.getElementById('gejq-host');
+      return host && host.shadowRoot && host.shadowRoot.querySelector('.gejq-query-history .gejq-example');
+    }, { timeout: 10000 });
+    const storedAfterMigration = await seeder.evaluate(() =>
+      new Promise((resolve) => {
+        chrome.storage.local.get(['gejq.queryHistory'], (items) =>
+          resolve(JSON.stringify(items['gejq.queryHistory']))
+        );
+      })
+    );
+    check(
+      'legacy stored headers are migrated in place',
+      !/cache-control|pragma/i.test(storedAfterMigration) && storedAfterMigration.includes('x-legacy'),
+      storedAfterMigration.slice(0, 160)
+    );
+    await page.evaluate(() => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      shadow.querySelector('.gejq-query-history .gejq-load').click();
+    });
+    await page.waitForTimeout(1600);
+    const legacyRestored = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#ge-header-list li')).map((li) => li.textContent)
+    );
+    check(
+      'a legacy saved query restores its real header only',
+      legacyRestored.includes('x-legacy: keep') &&
+        legacyRestored.every((h) => !/^\s*(pragma|cache-control)\s*:/i.test(h)),
+      legacyRestored.join(' | ')
+    );
+    await seeder.close();
+    // Clear the seeded entry so the sections below start from a clean
+    // history, exactly as they did before this block ran.
+    await page.evaluate(() => {
+      const shadow = document.getElementById('gejq-host').shadowRoot;
+      const buttons = Array.from(shadow.querySelectorAll('.gejq-history-actions .gejq-icon-button'));
+      const clear = buttons.find((b) => b.textContent.toLowerCase().includes('clear'));
+      clear.click();
+      clear.click(); // confirm
+    });
+    await page.waitForTimeout(300);
+  }
 
   // 10b2. Pausing a RUNNING chain is instant (the in-flight page fetch is
   // aborted and retried on resume), the controls survive streaming

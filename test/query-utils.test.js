@@ -1228,3 +1228,89 @@ test('knownFilterTags drops filter tags no longer present in the history', () =>
   // Entries with no tags array at all are tolerated.
   assert.deepEqual(GEJQ.knownFilterTags(['x'], [{ query: 'a', language: 'jq' }]), []);
 });
+
+test('sanitizeRequestHeaders strips Graph Explorer cache-busting directives', () => {
+  // GE sends these on every request; restoring them into the headers view
+  // is noise, so the header goes away when nothing else remains.
+  assert.deepEqual(
+    GEJQ.sanitizeRequestHeaders([
+      { name: 'Pragma', value: 'no-cache' },
+      { name: 'cache-control', value: 'no-cache' },
+      { name: 'x-demo', value: 'yes' }
+    ]),
+    [{ name: 'x-demo', value: 'yes' }]
+  );
+  // Case-insensitive on both the name and the directive.
+  assert.deepEqual(GEJQ.sanitizeRequestHeaders([{ name: 'PRAGMA', value: 'No-Cache' }]), []);
+  assert.deepEqual(GEJQ.sanitizeRequestHeaders([{ name: 'Cache-Control', value: 'NO-STORE' }]), []);
+  // A value the user typed themselves survives untouched…
+  assert.deepEqual(
+    GEJQ.sanitizeRequestHeaders([{ name: 'Cache-Control', value: 'max-age=0' }]),
+    [{ name: 'Cache-Control', value: 'max-age=0' }]
+  );
+  // …and only GE's directive is removed from a mixed value.
+  assert.deepEqual(
+    GEJQ.sanitizeRequestHeaders([{ name: 'Cache-Control', value: 'no-cache, max-age=30' }]),
+    [{ name: 'Cache-Control', value: 'max-age=30' }]
+  );
+});
+
+test('sanitizeRequestHeaders keeps commas inside quoted header values', () => {
+  assert.deepEqual(
+    GEJQ.sanitizeRequestHeaders([
+      { name: 'Prefer', value: 'ms-graph-dev-mode, outlook.body-content-type="text/html, plain"' }
+    ]),
+    [{ name: 'Prefer', value: 'outlook.body-content-type="text/html, plain"' }]
+  );
+});
+
+test('sanitizeRequestHeaders is idempotent and caps output at 20 pairs', () => {
+  const once = GEJQ.sanitizeRequestHeaders([
+    { name: 'Prefer', value: 'ms-graph-dev-mode, odata.maxpagesize=10' },
+    { name: 'Cache-Control', value: 'no-cache, max-age=5' },
+    { name: 'x-keep', value: '1' }
+  ]);
+  assert.deepEqual(GEJQ.sanitizeRequestHeaders(once), once);
+
+  // Dropped headers must not consume cap budget: Authorization plus 21
+  // real headers still yields the 20 cap, all of them real.
+  const many = [{ name: 'Authorization', value: 'Bearer x' }];
+  for (let i = 0; i < 21; i++) {
+    many.push({ name: 'x-h' + i, value: String(i) });
+  }
+  const capped = GEJQ.sanitizeRequestHeaders(many);
+  assert.equal(capped.length, 20);
+  assert.equal(capped[0].name, 'x-h0');
+});
+
+test('sanitizeQueryHistory cleans stored headers saved by older versions', () => {
+  const legacy = [
+    {
+      query: '.value',
+      language: 'jq',
+      context: { method: 'GET', url: 'https://graph.microsoft.com/v1.0/users', headers: [
+        { name: 'cache-control', value: 'no-cache' },
+        { name: 'Pragma', value: 'no-cache' },
+        { name: 'x-keep', value: '1' }
+      ], body: '' }
+    }
+  ];
+  const result = GEJQ.sanitizeQueryHistory(legacy);
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.list[0].context.headers, [{ name: 'x-keep', value: '1' }]);
+  // Other fields survive and the input is never mutated.
+  assert.equal(result.list[0].context.url, 'https://graph.microsoft.com/v1.0/users');
+  assert.equal(result.list[0].query, '.value');
+  assert.equal(legacy[0].context.headers.length, 3);
+
+  // Already-clean input is reported unchanged, so nothing is re-persisted.
+  assert.equal(GEJQ.sanitizeQueryHistory(result.list).changed, false);
+
+  // Malformed shapes are tolerated (old data, hand-edited storage).
+  assert.equal(GEJQ.sanitizeQueryHistory(null).changed, false);
+  assert.deepEqual(GEJQ.sanitizeQueryHistory([null, { query: 'a' }, { query: 'b', context: null }]).list.length, 3);
+  assert.deepEqual(
+    GEJQ.sanitizeQueryHistory([{ query: 'c', context: { headers: 'nope' } }]).list[0].context.headers,
+    []
+  );
+});
