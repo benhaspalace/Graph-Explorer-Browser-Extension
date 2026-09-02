@@ -2663,31 +2663,71 @@
   }
 
   /**
+   * Split an HTTP method pasted in front of a request URI — e.g.
+   * "GET https://graph.microsoft.com/v1.0/me", the exact shape of the
+   * panel's own response rows and of most docs samples — into
+   * { method, uri }. Returns null when there is no method prefix or the
+   * remainder does not look like a request URI (absolute URL, absolute
+   * path, or a bare v1.0/… | beta/… request).
+   */
+  function splitMethodPrefix(value) {
+    if (typeof value !== 'string') {
+      return null;
+    }
+    var match = /^\s*(GET|POST|PUT|PATCH|DELETE)\s+(\S.*)$/i.exec(value);
+    if (!match) {
+      return null;
+    }
+    var uri = match[2].trim();
+    if (!/^(https?:\/\/|\/|v1\.0[/?]|beta[/?])/i.test(uri)) {
+      return null;
+    }
+    return { method: match[1].toUpperCase(), uri: uri };
+  }
+
+  /**
+   * Parse the URI field's value into a URL, tolerating a pasted method
+   * prefix ("GET https://…") and host-relative paths (resolved against
+   * the captured request's origin). Returns null when it can't parse.
+   */
+  function parseEditorRequestUrl(editorValue, baseOrigin) {
+    if (!editorValue || typeof editorValue !== 'string') {
+      return null;
+    }
+    var trimmed = editorValue.trim();
+    var prefixed = splitMethodPrefix(trimmed);
+    if (prefixed) {
+      trimmed = prefixed.uri;
+    }
+    try {
+      return new URL(trimmed);
+    } catch (e) {
+      try {
+        return new URL(trimmed, baseOrigin);
+      } catch (e2) {
+        return null;
+      }
+    }
+  }
+
+  /**
    * True when a captured request URL corresponds to the query currently
    * sitting in Graph Explorer's URI field — the strongest signal that
-   * the user ran it deliberately. Tolerates encoding differences and the
-   * extra `$count=true` the advanced-query setting injects.
+   * the user ran it deliberately. Tolerates encoding differences, a
+   * pasted method prefix, and the `$count=true` the advanced-query
+   * setting injects (on either side: the field-side insertion can land
+   * just after the request was sent without it).
    */
   function graphRequestMatchesEditor(capturedUrl, editorValue) {
-    if (!editorValue || typeof editorValue !== 'string') {
-      return false;
-    }
     var captured;
     try {
       captured = new URL(capturedUrl);
     } catch (e) {
       return false;
     }
-    var editor = null;
-    var trimmed = editorValue.trim();
-    try {
-      editor = new URL(trimmed);
-    } catch (e) {
-      try {
-        editor = new URL(trimmed, captured.origin);
-      } catch (e2) {
-        return false;
-      }
+    var editor = parseEditorRequestUrl(editorValue, captured.origin);
+    if (!editor) {
+      return false;
     }
     if (captured.origin.toLowerCase() !== editor.origin.toLowerCase()) {
       return false;
@@ -2706,7 +2746,9 @@
     editor.searchParams.forEach(function (value, key) {
       var k = key.toLowerCase();
       if (!(k in capturedParams) || capturedParams[k] !== value) {
-        mismatch = true;
+        if (!(k === '$count' && value === 'true' && !(k in capturedParams))) {
+          mismatch = true;
+        }
       }
       seen[k] = true;
     });
@@ -2717,6 +2759,32 @@
       return !seen[k] && !(k === '$count' && capturedParams[k] === 'true');
     });
     return extras.length === 0;
+  }
+
+  /**
+   * Weaker match than graphRequestMatchesEditor: same origin and
+   * resource path as the URI field, query options aside. When the user
+   * iterates on a query's parameters ($select/$expand/$filter/…) the
+   * field can drift from the exact URL that was sent — an edit right
+   * after Run, or the advanced-query $count insertion racing a request —
+   * but it still points at the same resource, which no Graph Explorer
+   * background call does.
+   */
+  function graphRequestPathMatchesEditor(capturedUrl, editorValue) {
+    var captured;
+    try {
+      captured = new URL(capturedUrl);
+    } catch (e) {
+      return false;
+    }
+    var editor = parseEditorRequestUrl(editorValue, captured.origin);
+    if (!editor) {
+      return false;
+    }
+    return (
+      captured.origin.toLowerCase() === editor.origin.toLowerCase() &&
+      captured.pathname.replace(/\/+$/, '').toLowerCase() === editor.pathname.replace(/\/+$/, '').toLowerCase()
+    );
   }
 
   // Never captured: credentials and Graph Explorer's own telemetry
@@ -2845,7 +2913,10 @@
    * own background calls, combining three signals:
    *  - known-internal URL patterns (profile, organization, permission
    *    grants, service principals),
-   *  - whether the URL matches the query in Graph Explorer's URI field,
+   *  - whether the URL matches the query in Graph Explorer's URI field —
+   *    exactly, or (for non-pattern URLs) at least the same resource
+   *    path, so iterating on a query's parameters never hides the
+   *    response when the field has drifted from the exact sent URL,
    *  - whether the user recently ran a query (Run button / Enter),
    *    passed as msSinceRun (-1 = never).
    * The URI field alone is not enough: it is pre-filled with /v1.0/me,
@@ -2863,6 +2934,9 @@
       return !(editorMatch && recentRun);
     }
     if (editorMatch) {
+      return false;
+    }
+    if (graphRequestPathMatchesEditor(url, editorValue)) {
       return false;
     }
     return !recentRun;
@@ -3480,6 +3554,8 @@
     sanitizeRequestHeaders: sanitizeRequestHeaders,
     sanitizeQueryHistory: sanitizeQueryHistory,
     graphRequestMatchesEditor: graphRequestMatchesEditor,
+    graphRequestPathMatchesEditor: graphRequestPathMatchesEditor,
+    splitMethodPrefix: splitMethodPrefix,
     classifyBackgroundRequest: classifyBackgroundRequest,
     applyAdvancedQuery: applyAdvancedQuery,
     parseGraphRequest: parseGraphRequest,

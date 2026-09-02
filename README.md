@@ -63,12 +63,19 @@ status for this branch.
   JMESPath functions, the jq builtins the bundled engine supports, JSONPath
   syntax snippets). ↑/↓ to choose, Enter/Tab to accept, Esc to dismiss.
   Suggestions never appear inside string literals.
+- **Paste method + URL** — pasting a request with its HTTP method in front
+  (`GET https://graph.microsoft.com/v1.0/me` — the shape of the panel's own
+  response rows and of most docs samples) into Graph Explorer's URI field
+  removes the method from the field and selects it in Graph Explorer's
+  method dropdown for you, so the request goes out correctly.
 - **Background-request filtering** — Graph Explorer's own calls (signed-in
   user, organization, permission grants) are kept out of the response list.
   Classification combines known-internal URL patterns, a match against the
-  query in the URI field, and whether you actually ran a query — so a
-  deliberate `GET /me` stays visible. A setting reveals the hidden entries
-  (marked ⚙) when you need them.
+  query in the URI field (the exact request, or at least the same resource
+  path — so re-running a query with tweaked `$select`/`$filter`/`$expand`
+  parameters always stays visible), and whether you actually ran a query —
+  so a deliberate `GET /me` stays visible. A setting reveals the hidden
+  entries (marked ⚙) when you need them.
 - **Automatic sign-in** — opening Graph Explorer while signed out clicks the
   profile view for you to start the sign-in flow (on by default; your browser
   may ask you to allow the sign-in popup).

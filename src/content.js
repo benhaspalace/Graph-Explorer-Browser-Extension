@@ -1990,6 +1990,7 @@
         if (event.target !== findEditorInput()) {
           return;
         }
+        stripPastedMethodPrefix(event.target);
         if (assistTimer) {
           clearTimeout(assistTimer);
         }
@@ -2008,6 +2009,33 @@
       },
       true
     );
+  }
+
+  /**
+   * A URI pasted with its HTTP method in front ("GET https://…" — the
+   * shape of the panel's own response rows and of most docs samples)
+   * would go to Graph verbatim and fail. Strip the method from the
+   * field, keep the caret in place, and select that method through
+   * Graph Explorer's own dropdown instead.
+   */
+  function stripPastedMethodPrefix(input) {
+    var split = GEJQ.splitMethodPrefix(input.value);
+    if (!split || split.uri === input.value) {
+      return;
+    }
+    var caret = input.selectionStart;
+    var removed = input.value.length - split.uri.length;
+    // Re-entrant input event: the new value has no prefix, so this no-ops.
+    setNativeInputValue(input, split.uri);
+    if (typeof caret === 'number') {
+      var next = Math.max(0, Math.min(caret - removed, input.value.length));
+      try {
+        input.setSelectionRange(next, next);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    ensureMethodSelected(split.method);
   }
 
   // ------------------------------------------------------- autocomplete

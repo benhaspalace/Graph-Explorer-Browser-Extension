@@ -578,6 +578,29 @@ function check(name, ok, extra) {
     await page.evaluate(() => document.getElementById('ge-editor-input').value)
   );
 
+  // Pasting a method in front of the URI ("PATCH https://…") strips the
+  // method from the field and selects it through GE's method dropdown.
+  await page.locator('#ge-editor-input').fill('PATCH https://graph.microsoft.com/v1.0/users/x');
+  await page.waitForTimeout(400);
+  check(
+    'pasted method prefix is stripped from the URI field',
+    (await page.evaluate(() => document.getElementById('ge-editor-input').value)) ===
+      'https://graph.microsoft.com/v1.0/users/x',
+    await page.evaluate(() => document.getElementById('ge-editor-input').value)
+  );
+  check(
+    'pasted method selected in the method dropdown',
+    (await page.evaluate(() => document.getElementById('ge-method').textContent.trim())) === 'PATCH'
+  );
+  await page.locator('#ge-editor-input').fill('GET https://graph.microsoft.com/v1.0/users?$top=3');
+  await page.waitForTimeout(400);
+  check(
+    'pasting a GET request switches the method back',
+    (await page.evaluate(() => document.getElementById('ge-method').textContent.trim())) === 'GET' &&
+      (await page.evaluate(() => document.getElementById('ge-editor-input').value)) ===
+        'https://graph.microsoft.com/v1.0/users?$top=3'
+  );
+
   // Auto sign-in: the fixture's profile-view button must get clicked once.
   check('auto sign-in clicked the profile view', (await page.evaluate(() => window.__signInClicks)) === 1);
 
